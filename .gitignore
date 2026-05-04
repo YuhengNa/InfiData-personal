@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# 大文件不要上传
+raw_data/
+downloads/
+videos/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.hdf5
+*.h5
+
+# 大生成文件
+data_full/
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# 允许的示例文件
+!examples/aloha_mini/data/**/*.parquet
+!examples/aloha_mini/meta/*.json
+!examples/aloha_mini/meta/*.jsonl
+!examples/aloha_mini/report_samples/*.jpg
+!examples/aloha_mini/report_samples/*.png
