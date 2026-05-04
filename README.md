@@ -38,21 +38,21 @@ InfiData 是一个面向社区共建的 **π₀.₇ 风格** 机器人学习数�
 ## 仓库结构
 InfiData/
 
--├── schemas/                    # JSON Schema 数据格式规范
--├── configs/                    # 配置字典（机器人、任务、数据源）
--├── scripts/                    # 转换、标注、验证脚本
--│   ├── convert/
--│   ├── annotate/
--│   └── validate/
--├── data/                       # Parquet 数据（按来源分）
--├── videos/                     # MP4 视频文件
--├── subgoals/                   # 子目标图像
--├── meta/                       # episodes.jsonl、segments.jsonl、stats.json 等
--├── examples/                   # ALOHA mini 示例
--├── docs/
--├── CONTRIBUTING.md
--├── LICENSE
--└── README.md
+- ├── schemas/                    # JSON Schema 数据格式规范
+- ├── configs/                    # 配置字典（机器人、任务、数据源）
+- ├── scripts/                    # 转换、标注、验证脚本
+- │   ├── convert/
+- │   ├── annotate/
+- │   └── validate/
+- ├── data/                       # Parquet 数据（按来源分）
+- ├── videos/                     # MP4 视频文件
+- ├── subgoals/                   # 子目标图像
+- ├── meta/                       # episodes.jsonl、segments.jsonl、stats.json 等
+- ├── examples/                   # ALOHA mini 示例
+- ├── docs/
+- ├── CONTRIBUTING.md
+- ├── LICENSE
+- └── README.md
 ---
 
 ## 数据类别（共8类）
