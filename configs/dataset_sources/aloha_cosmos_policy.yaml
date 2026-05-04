@@ -1,0 +1,13 @@
+name: ALOHA-Cosmos-Policy
+category: robot_demos
+raw_format:
+  - hdf5
+  - mp4
+has_robot_action: true
+has_video: true
+default_fps: 25
+default_robot_type: aloha2_bimanual_viperx
+default_control_mode: joint
+domain: real
+license: CC BY 4.0
+notes: First reference converter and mini example. High-quality bimanual teleoperation data.

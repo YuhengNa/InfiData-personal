@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InfiData Segment Annotation Schema",
+  "type": "object",
+  "required": ["episode_index", "segment_index", "start_frame", "end_frame", "task", "subtask", "annotation_status"],
+  "properties": {
+    "episode_index": { "type": "integer" },
+    "segment_index": { "type": "integer" },
+    "start_frame": { "type": "integer" },
+    "end_frame": { "type": "integer" },
+    "task": { "type": "string" },
+    "subtask": { "type": "string" },
+    "mistake": { "type": "boolean" },
+    "annotation_status": { "type": "string", "enum": ["auto_placeholder", "vlm_pseudo", "human_labeled", "reviewed", "approved"] },
+    "annotator": { "type": "string" },
+    "reviewer": { "type": "string" }
+  }
+}
