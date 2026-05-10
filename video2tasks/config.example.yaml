@@ -1,0 +1,56 @@
+# Video2Tasks Configuration
+# Copy this file to config.yaml and customize for your setup
+
+# Dataset configuration
+# Format: list of {root: path, subset: name} pairs
+datasets:
+  - root: "./data"  # Path to your video data directory
+    subset: "demo"   # Subdirectory name containing video samples
+
+# Run configuration
+run:
+  base_dir: "./runs"  # Base directory for all outputs
+  run_id: "default"    # Run identifier (creates subdirectory)
+
+# Server configuration
+server:
+  host: "0.0.0.0"
+  port: 8099
+  max_queue: 32
+  inflight_timeout_sec: 300.0
+  max_retries_per_job: 5
+  auto_exit_after_all_done: false
+
+# Worker configuration
+worker:
+  server_url: "http://127.0.0.1:8099"
+  backend: "dummy"  # Options: "dummy", "qwen3vl", "remote_api"
+  
+  # Qwen3VL-specific settings (only used when backend: qwen3vl)
+  qwen3vl:
+    model_path: "/path/to/Qwen3-VL-32B-Instruct"  # Or HuggingFace model name
+    device_map: "balanced"  # "auto", "balanced", "balanced_low_0", or specific device
+
+  # Remote API settings (only used when backend: remote_api)
+  remote_api:
+    api_url: "http://127.0.0.1:8080/infer"
+    api_key: ""
+    timeout_sec: 60.0
+    headers: {}
+
+# Windowing configuration
+windowing:
+  window_sec: 16.0        # Window duration in seconds
+  step_sec: 8.0          # Step size between windows
+  frames_per_window: 16  # Number of frames to sample per window
+  target_width: 720      # Target frame width
+  target_height: 480     # Target frame height
+  png_compression: 0     # PNG compression level (0-9)
+
+# Progress configuration
+progress:
+  total_override: 0  # Override total sample count (0 = auto-detect)
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
