@@ -57,22 +57,28 @@ InfiData/
 ├── scripts/
 │   ├── convert/
 │   │   ├── convert_aloha_cosmos_mini.py
-│   │   └── convert_droid_mini.py
+│   │   ├── convert_droid_mini.py
+│   │   └── convert_rmbench_mini.py
+│   ├── convert2openpi/
+│   │   └── convert_rmbench.py
 │   ├── annotate/
 │   ├── subgoals/
 │   └── validate/
 ├── examples/
 │   ├── aloha_mini/
-│   └── droid_mini/
+│   ├── droid_mini/
+│   ├── rmbench_mini/
+│   └── rmbench_lerobot_mini/
 ├── video2tasks/
 └── tools/
 ```
 
 目前仓库已经包含：
 
-1. 两个可运行转换示例：ALOHA mini、DROID mini。
+1. 三个 InfiData 转换示例：ALOHA mini、DROID mini、RMBench mini。
 2. 统一 schema 与配置组织方式。
-3. 一个可用于自动分段与指令生成的 video2tasks 模块。
+3. 一个 InfiData 到 LeRobot/openpi 的转换示例。
+4. 一个可用于自动分段与指令生成的 video2tasks 模块。
 
 ---
 
@@ -149,6 +155,20 @@ examples/droid_mini：
 3. 包含标准相机映射和 real_future 子目标帧指针。
 4. 当前 subtask 为自动占位分段，便于先打通流程。
 
+examples/rmbench_mini：
+
+1. RMBench `battery_try/demo_clean` 的最小 InfiData 转换示例。
+2. 包含 3 个 episode parquet 与 3 路相机 mp4。
+3. `subtask` 与 `meta/segments.jsonl` 来自 RMBench `language_annotation.json`，不是占位 fake data。
+4. `subgoal.real_future.*` 是未来帧指针，用于训练或检索未来视觉目标；它不是人工语义目标文本。
+
+examples/rmbench_lerobot_mini：
+
+1. 由 `examples/rmbench_mini` 进一步转换得到的 LeRobot/openpi 示例。
+2. 包含 3 个 episode parquet，图像以 LeRobot `image` feature 写入 parquet。
+3. 包含 openpi 训练所需的 `observation.images.*`、`observation.state`、`action`、`task`。
+4. 额外保留 `subtask` 和 `memory` 字段；当前 `memory` 与 `subtask` 相同，后续可以替换为人工标注的长期记忆字段。
+
 ### 4. 自动分段与 VLM 辅助
 
 video2tasks 可用于长视频自动分段与指令草稿生成，典型流程：
@@ -193,6 +213,47 @@ python scripts/convert/convert_droid_mini.py \
   --out_root examples/droid_mini \
   --num_episodes 3
 ```
+
+### 4) 生成 RMBench mini 示例
+
+RMBench 原始数据需要是完整 task 目录，例如：
+
+```text
+/path/to/RMBench/data/battery_try/demo_clean/
+├── data/
+│   ├── episode0.hdf5
+│   └── ...
+├── instructions/
+└── language_annotation.json
+```
+
+转换为 InfiData：
+
+```bash
+python scripts/convert/convert_rmbench_mini.py \
+  --rmbench_root /path/to/RMBench/data \
+  --task_name battery_try \
+  --out_root examples/rmbench_mini \
+  --num_episodes 3
+```
+
+### 5) 生成 LeRobot/openpi 示例
+
+先准备好 LeRobot 依赖环境，例如使用 openpi 仓库的 Python 环境。建议把 LeRobot 缓存目录放到大盘：
+
+```bash
+export HF_LEROBOT_HOME=/home/wudi/wudi_data/lerobot
+python scripts/convert2openpi/convert_rmbench.py \
+  --infidata_root examples/rmbench_mini \
+  --repo_id wudi/rmbench_battery_try_demo3 \
+  --output_root examples/rmbench_lerobot_mini \
+  --num_episodes 3 \
+  --fps 30 \
+  --use_images \
+  --overwrite
+```
+
+`--use_images` 会把三路相机帧写为 LeRobot `image` feature，适合直接检查和接入 openpi 训练。若希望输出 LeRobot `video` feature，可以去掉 `--use_images`。
 
 ---
 

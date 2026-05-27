@@ -35,3 +35,11 @@ checkpoints/
 !examples/aloha_mini/meta/*.jsonl
 !examples/aloha_mini/report_samples/*.jpg
 !examples/aloha_mini/report_samples/*.png
+!examples/rmbench_mini/data/**/*.parquet
+!examples/rmbench_mini/meta/*.json
+!examples/rmbench_mini/meta/*.jsonl
+!examples/rmbench_mini/videos/
+!examples/rmbench_mini/videos/**
+!examples/rmbench_lerobot_mini/data/**/*.parquet
+!examples/rmbench_lerobot_mini/meta/*.json
+!examples/rmbench_lerobot_mini/meta/*.jsonl

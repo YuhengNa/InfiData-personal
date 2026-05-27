@@ -1,0 +1,17 @@
+{
+  "robotwin_dual_arm_sim": {
+    "robot_type": "robotwin_dual_arm_sim",
+    "domain": "sim",
+    "state_dim": 14,
+    "action_dim": 14,
+    "control_mode": "joint",
+    "fps": 30,
+    "cameras": [
+      "cam_high",
+      "cam_left_wrist",
+      "cam_right_wrist"
+    ],
+    "state_description": "RMBench /joint_action/vector at timestep t",
+    "action_description": "RMBench next-step /joint_action/vector at timestep t+1"
+  }
+}
