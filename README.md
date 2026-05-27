@@ -182,6 +182,7 @@ video2tasks 可用于长视频自动分段与指令草稿生成，典型流程�
 
 1. video2tasks/README.md
 2. video2tasks/README_CN.md
+3. docs/rmbench_openpi_handoff.md
 
 ---
 
