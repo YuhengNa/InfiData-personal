@@ -79,6 +79,17 @@ infidata:
   write_back: false
   update_parquet_subtasks: false
 
+# Memory annotation options
+memory:
+  use_subtask_context: true
+
+# Visualization options
+# Renders annotated videos with subtask and memory timelines.
+visualization:
+  enabled: false
+  output_dir: ""
+  panel_height: 180
+
 # Progress configuration
 progress:
   total_override: 0  # Override total sample count (0 = auto-detect)

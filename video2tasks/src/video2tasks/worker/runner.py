@@ -25,6 +25,22 @@ def decode_b64_to_numpy(b64_str: str) -> Optional[np.ndarray]:
     """Decode base64 string to numpy BGR array."""
     if not b64_str:
         return None
+
+
+def format_subtask_context(meta: Dict[str, Any]) -> str:
+    segments = meta.get("subtask_segments") or []
+    if not segments:
+        return ""
+
+    lines = [
+        "\n\n### Existing Subtask Segments for This Window",
+        "Use these existing subtask annotations as context. Memory boundaries may align with them, but only change memory when persistent facts change.",
+    ]
+    for seg in segments:
+        lines.append(
+            f"- frames {seg.get('start_frame')}-{seg.get('end_frame')}: {seg.get('subtask', '')}"
+        )
+    return "\n".join(lines)
     
     try:
         img_bytes = base64.b64decode(b64_str)
@@ -116,6 +132,8 @@ def run_worker(config: Config) -> None:
                     segmentation_mode=config.segmentation.mode,
                     targets=config.annotation.targets,
                 )
+                if config.memory.use_subtask_context:
+                    prompt += format_subtask_context(job.get("meta", {}))
                 vlm_json: Dict[str, Any] = {}
                 
                 for attempt in range(MAX_LOCAL_RETRIES):

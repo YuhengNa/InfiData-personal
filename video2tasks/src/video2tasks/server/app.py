@@ -18,6 +18,7 @@ from .windowing import (
     read_video_info, build_windows, FrameExtractor,
     build_segments_via_cuts, build_memory_segments_via_cuts, Window
 )
+from .visualize import render_annotation_video
 
 
 class SubmitModel(BaseModel):
@@ -42,6 +43,7 @@ class DatasetCtx:
     sample_ids: List[str]
     sample_videos: Dict[str, str]
     sample_meta: Dict[str, Dict[str, Any]]
+    sample_subtasks: Dict[str, List[Dict[str, Any]]]
 
 
 def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -69,6 +71,40 @@ def _replace_episode_records(path: Path, new_records: List[Dict[str, Any]], epis
     _write_jsonl(path, merged)
 
 
+def _load_segments_by_sample(data_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
+    path = data_dir / "meta" / "segments.jsonl"
+    if not path.exists():
+        return {}
+
+    by_sample: Dict[str, List[Dict[str, Any]]] = {}
+    for rec in _load_jsonl(path):
+        episode_index = int(rec.get("episode_index", -1))
+        if episode_index < 0:
+            continue
+        sample_id = f"episode_{episode_index:06d}"
+        by_sample.setdefault(sample_id, []).append(rec)
+
+    for records in by_sample.values():
+        records.sort(key=lambda x: (int(x.get("start_frame", 0)), int(x.get("segment_index", 0))))
+    return by_sample
+
+
+def _segments_for_window(records: List[Dict[str, Any]], start_frame: int, end_frame: int) -> List[Dict[str, Any]]:
+    selected = []
+    for rec in records:
+        if int(rec.get("end_frame", -1)) < start_frame:
+            continue
+        if int(rec.get("start_frame", 0)) > end_frame:
+            continue
+        selected.append({
+            "segment_index": int(rec.get("segment_index", len(selected))),
+            "start_frame": int(rec.get("start_frame", 0)),
+            "end_frame": int(rec.get("end_frame", 0)),
+            "subtask": str(rec.get("subtask", "")),
+        })
+    return selected
+
+
 def _update_episode_parquet_subtasks(data_dir: Path, source_meta: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
     parquet_rel = source_meta.get("parquet_path")
     if not parquet_rel:
@@ -94,11 +130,50 @@ def _update_episode_parquet_subtasks(data_dir: Path, source_meta: Dict[str, Any]
     df.to_parquet(parquet_path, index=False)
 
 
-def _parse_infidata_samples(data_dir: Path, video_key: str) -> tuple[List[str], Dict[str, str], Dict[str, Dict[str, Any]]]:
+def _candidate_videos(data_dir: Path, video_key: str) -> List[Path]:
+    videos_root = data_dir / "videos"
+    if not videos_root.exists():
+        return []
+    mp4s = sorted(videos_root.rglob("*.mp4"))
+    if video_key and video_key != "auto":
+        keyed = [p for p in mp4s if video_key in p.name]
+        if keyed:
+            return keyed
+    return mp4s
+
+
+def _parse_infidata_samples(data_dir: Path, video_key: str) -> tuple[List[str], Dict[str, str], Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
     episodes_path = data_dir / "meta" / "episodes.jsonl"
+    sample_subtasks = _load_segments_by_sample(data_dir)
+    videos = _candidate_videos(data_dir, video_key)
+
     if not episodes_path.exists():
-        print(f"[Warn] InfiData episodes file not found: {episodes_path}")
-        return [], {}, {}
+        if not sample_subtasks:
+            print(f"[Warn] InfiData episodes file not found: {episodes_path}")
+            return [], {}, {}, {}
+
+        sample_ids = sorted(sample_subtasks.keys())
+        sample_videos = {}
+        sample_meta = {}
+        for sample_id in sample_ids:
+            episode_index = int(sample_id.split("_")[-1])
+            if episode_index < len(videos):
+                video_path = videos[episode_index].resolve()
+            else:
+                print(f"[Warn] No video found for {sample_id} under {data_dir / 'videos'}")
+                continue
+            first_segment = sample_subtasks.get(sample_id, [{}])[0]
+            sample_videos[sample_id] = str(video_path)
+            sample_meta[sample_id] = {
+                "episode_index": episode_index,
+                "task": first_segment.get("task", ""),
+                "source_dataset": "RMBench",
+                "parquet_path": "",
+                "fps": None,
+                "video_key": video_key,
+                "video_path": str(video_path),
+            }
+        return sorted(sample_videos.keys()), sample_videos, sample_meta, sample_subtasks
 
     sample_ids = []
     sample_videos = {}
@@ -108,29 +183,35 @@ def _parse_infidata_samples(data_dir: Path, video_key: str) -> tuple[List[str], 
         episode_index = int(ep["episode_index"])
         sample_id = f"episode_{episode_index:06d}"
         video_paths = ep.get("video_paths") or {}
-        video_rel = video_paths.get(video_key)
+        video_rel = None if video_key == "auto" else video_paths.get(video_key)
 
         if not video_rel and ep.get("parquet_path"):
             try:
                 import pandas as pd
 
                 parquet_path = data_dir / str(ep["parquet_path"])
-                df = pd.read_parquet(parquet_path, columns=[f"video.{video_key}.path"])
+                parquet_video_key = "cam_high" if video_key == "auto" else video_key
+                df = pd.read_parquet(parquet_path, columns=[f"video.{parquet_video_key}.path"])
                 if not df.empty:
-                    video_rel = df[f"video.{video_key}.path"].iloc[0]
+                    video_rel = df[f"video.{parquet_video_key}.path"].iloc[0]
             except Exception as exc:
                 print(f"[Warn] Could not read video path from parquet for {sample_id}: {exc}")
+
+        if not video_rel and episode_index < len(videos):
+            video_rel = str(videos[episode_index].resolve())
 
         if not video_rel:
             print(f"[Warn] Missing video_paths.{video_key} for {sample_id}")
             continue
 
-        video_path = (data_dir / video_rel).resolve()
+        video_path = Path(video_rel)
+        if not video_path.is_absolute():
+            video_path = (data_dir / video_rel).resolve()
         sample_ids.append(sample_id)
         sample_videos[sample_id] = str(video_path)
         sample_meta[sample_id] = {
             "episode_index": episode_index,
-            "task": ep.get("task", ""),
+            "task": ep.get("task", "") or (sample_subtasks.get(sample_id, [{}])[0].get("task", "")),
             "source_dataset": ep.get("source_dataset", ""),
             "parquet_path": ep.get("parquet_path", ""),
             "fps": ep.get("fps", None),
@@ -138,7 +219,7 @@ def _parse_infidata_samples(data_dir: Path, video_key: str) -> tuple[List[str], 
             "video_path": str(video_path),
         }
 
-    return sample_ids, sample_videos, sample_meta
+    return sample_ids, sample_videos, sample_meta, sample_subtasks
 
 
 def parse_datasets(config: Config) -> List[DatasetCtx]:
@@ -152,9 +233,10 @@ def parse_datasets(config: Config) -> List[DatasetCtx]:
 
         sample_videos: Dict[str, str] = {}
         sample_meta: Dict[str, Dict[str, Any]] = {}
+        sample_subtasks: Dict[str, List[Dict[str, Any]]] = {}
 
         if ds.format == "infidata":
-            sample_ids, sample_videos, sample_meta = _parse_infidata_samples(data_dir, ds.video_key)
+            sample_ids, sample_videos, sample_meta, sample_subtasks = _parse_infidata_samples(data_dir, ds.video_key)
         elif data_dir.exists():
             sample_ids = sorted([p.name for p in data_dir.iterdir() if p.is_dir()])
         else:
@@ -171,6 +253,7 @@ def parse_datasets(config: Config) -> List[DatasetCtx]:
             sample_ids=sample_ids,
             sample_videos=sample_videos,
             sample_meta=sample_meta,
+            sample_subtasks=sample_subtasks,
         ))
     return ctxs
 
@@ -430,6 +513,13 @@ def create_app(config: Config) -> FastAPI:
                                         "sample_id": sid,
                                         "window_id": w.window_id,
                                         "frame_ids": w.frame_ids,
+                                        "window_start_frame": w.start_frame,
+                                        "window_end_frame": w.end_frame,
+                                        "subtask_segments": _segments_for_window(
+                                            ctx.sample_subtasks.get(sid, []),
+                                            w.start_frame,
+                                            w.end_frame,
+                                        ) if config.memory.use_subtask_context else [],
                                         **ctx.sample_meta.get(sid, {}),
                                     }
                                 }
@@ -477,6 +567,8 @@ def create_app(config: Config) -> FastAPI:
                             source_meta = ctx.sample_meta.get(sid, {})
                             episode_index = int(source_meta.get("episode_index", -1))
                             task = str(source_meta.get("task", ""))
+                            subtask_records_for_viz = ctx.sample_subtasks.get(sid, [])
+                            memory_records_for_viz: List[Dict[str, Any]] = []
 
                             if "subtask" in config.annotation.targets:
                                 final_res = build_segments_via_cuts(
@@ -505,6 +597,7 @@ def create_app(config: Config) -> FastAPI:
                                         })
 
                                     _write_jsonl(Path(infidata_segments_path(ctx.samples_dir, sid)), infidata_records)
+                                    subtask_records_for_viz = infidata_records
                                     with open(run_infidata_segments_path(ctx.run_dir), "a", encoding="utf-8") as f:
                                         for rec in infidata_records:
                                             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -549,6 +642,7 @@ def create_app(config: Config) -> FastAPI:
                                     })
 
                                 _write_jsonl(Path(memory_segments_path(ctx.samples_dir, sid)), memory_records)
+                                memory_records_for_viz = memory_records
                                 with open(run_memory_segments_path(ctx.run_dir), "a", encoding="utf-8") as f:
                                     for rec in memory_records:
                                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -560,6 +654,18 @@ def create_app(config: Config) -> FastAPI:
                                         episode_index,
                                     )
                                     print(f"[WriteBack] Updated {ctx.subset}/meta/memory_segments.jsonl for episode {episode_index}")
+
+                            if config.visualization.enabled and memory_records_for_viz:
+                                viz_dir = Path(config.visualization.output_dir) if config.visualization.output_dir else Path(ctx.run_dir) / "visualizations"
+                                viz_path = viz_dir / f"{sid}_annotated.mp4"
+                                render_annotation_video(
+                                    mp4,
+                                    str(viz_path),
+                                    subtask_records_for_viz,
+                                    memory_records_for_viz,
+                                    panel_height=config.visualization.panel_height,
+                                )
+                                print(f"[Visualize] Wrote {viz_path}")
                             
                             done_path = done_marker_path(ctx.samples_dir, sid)
                             already_done = Path(done_path).exists()

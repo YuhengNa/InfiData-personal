@@ -149,6 +149,24 @@ class InfiDataConfig(BaseModel):
     )
 
 
+class MemoryConfig(BaseModel):
+    """Memory annotation behavior."""
+    use_subtask_context: bool = Field(
+        default=True,
+        description="Include existing subtask segments in memory prompts when available",
+    )
+
+
+class VisualizationConfig(BaseModel):
+    """Render annotated videos for quality inspection."""
+    enabled: bool = Field(default=False, description="Render a visualization video after each episode")
+    output_dir: str = Field(
+        default="",
+        description="Optional output directory. Defaults to <run_dir>/visualizations",
+    )
+    panel_height: int = Field(default=180, description="Bottom annotation panel height in pixels")
+
+
 class ProgressConfig(BaseModel):
     """Progress tracking configuration."""
     total_override: int = Field(default=0, description="Override total count (0=auto)")
@@ -178,6 +196,8 @@ class Config(BaseModel):
     segmentation: SegmentationConfig = Field(default_factory=SegmentationConfig)
     annotation: AnnotationConfig = Field(default_factory=AnnotationConfig)
     infidata: InfiDataConfig = Field(default_factory=InfiDataConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    visualization: VisualizationConfig = Field(default_factory=VisualizationConfig)
     progress: ProgressConfig = Field(default_factory=ProgressConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
