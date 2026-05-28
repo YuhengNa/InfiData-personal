@@ -8,6 +8,12 @@ import cv2
 import base64
 
 
+def _annotation_payload(vlm: dict, key: str) -> dict:
+    if isinstance(vlm.get(key), dict):
+        return vlm[key]
+    return vlm
+
+
 @dataclass
 class Window:
     """Video window definition."""
@@ -158,7 +164,7 @@ def build_segments_via_cuts(
         if not rec:
             continue
         
-        vlm = rec.get("vlm_json", {})
+        vlm = _annotation_payload(rec.get("vlm_json", {}), "subtask")
         transitions = vlm.get("transitions", [])
         instructions = vlm.get("instructions", [])
         f_ids = w.frame_ids
@@ -275,4 +281,156 @@ def build_segments_via_cuts(
         "sample_id": sample_id,
         "nframes": nframes,
         "segments": final_output
+    }
+
+
+def build_memory_segments_via_cuts(
+    sample_id: str,
+    windows: List[Window],
+    by_wid: dict,
+    fps: float,
+    nframes: int,
+    frames_per_window: int = 16
+) -> dict:
+    """Build memory segments from window-level memory annotations."""
+    if nframes == 0:
+        return {}
+
+    if fps < 1e-6:
+        fps = 30.0
+
+    from collections import Counter
+
+    raw_cuts = []
+    summary_timeline = [[] for _ in range(nframes)]
+    event_timeline = [[] for _ in range(nframes)]
+    center_weights = np.hanning(frames_per_window + 2)[1:-1]
+
+    for wid, w in enumerate(windows):
+        rec = by_wid.get(wid)
+        if not rec:
+            continue
+
+        vlm = _annotation_payload(rec.get("vlm_json", {}), "memory")
+        transitions = vlm.get("transitions", [])
+        summaries = vlm.get("summaries", [])
+        event_types = vlm.get("change_event_types", [])
+        f_ids = w.frame_ids
+        cur_len = len(f_ids)
+
+        if cur_len == 0:
+            continue
+
+        for t_idx in transitions:
+            try:
+                idx = int(t_idx)
+                if 0 <= idx < cur_len:
+                    global_fid = f_ids[idx]
+                    if cur_len == frames_per_window:
+                        w_val = center_weights[idx]
+                    else:
+                        w_val = 1.0 if min(idx, cur_len - 1 - idx) > 2 else 0.5
+                    raw_cuts.append((global_fid, float(w_val)))
+            except (ValueError, IndexError):
+                pass
+
+        try:
+            boundaries = [0] + [int(t) for t in transitions if 0 <= int(t) < cur_len] + [cur_len]
+            boundaries = sorted(list(set(boundaries)))
+
+            for i in range(len(boundaries) - 1):
+                if i < len(summaries):
+                    summary = str(summaries[i]).strip()
+                    if summary:
+                        events = event_types[i] if i < len(event_types) else ["memory_updated"]
+                        if isinstance(events, str):
+                            events = [events]
+                        events = [str(x).strip() for x in events if str(x).strip()]
+                        s_local, e_local = boundaries[i], boundaries[i + 1]
+                        for k in range(s_local, e_local):
+                            if k < cur_len:
+                                global_fid = f_ids[k]
+                                if global_fid < nframes:
+                                    summary_timeline[global_fid].append(summary)
+                                    event_timeline[global_fid].extend(events)
+        except (ValueError, IndexError, TypeError):
+            pass
+
+    final_cut_points = [0]
+
+    if raw_cuts:
+        raw_cuts.sort(key=lambda x: x[0])
+        cluster_gap = max(1.0, 2.5 * fps)
+        cur_frames = []
+        cur_weights = []
+
+        for fid, w in raw_cuts:
+            if not cur_frames:
+                cur_frames.append(fid)
+                cur_weights.append(w)
+                continue
+
+            if (fid - cur_frames[-1]) < cluster_gap:
+                cur_frames.append(fid)
+                cur_weights.append(w)
+            else:
+                if cur_weights and sum(cur_weights) > 1e-9:
+                    final_cut_points.append(int(np.average(cur_frames, weights=cur_weights)))
+                else:
+                    final_cut_points.append(int(np.mean(cur_frames)))
+                cur_frames = [fid]
+                cur_weights = [w]
+
+        if cur_frames:
+            if cur_weights and sum(cur_weights) > 1e-9:
+                final_cut_points.append(int(np.average(cur_frames, weights=cur_weights)))
+            else:
+                final_cut_points.append(int(np.mean(cur_frames)))
+
+    final_cut_points.append(nframes)
+    final_cut_points = sorted(list(set(final_cut_points)))
+
+    final_output = []
+    seg_id = 0
+
+    for i in range(len(final_cut_points) - 1):
+        s, e = int(final_cut_points[i]), int(final_cut_points[i + 1])
+        min_frames = max(1, int(0.8 * fps))
+
+        if (e - s) < min_frames:
+            continue
+
+        margin = int((e - s) * 0.2) if e > s else 0
+        mid_s, mid_e = s + margin, e - margin
+
+        summaries = []
+        events = []
+        for f in range(mid_s, mid_e + 1):
+            if f < nframes:
+                summaries.extend(summary_timeline[f])
+                events.extend(event_timeline[f])
+
+        if not summaries:
+            for f in range(s, e):
+                if f < nframes:
+                    summaries.extend(summary_timeline[f])
+                    events.extend(event_timeline[f])
+
+        if summaries:
+            best_summary = Counter(summaries).most_common(1)[0][0]
+            best_events = [x for x, _ in Counter(events).most_common(4)] or ["memory_updated"]
+            final_output.append({
+                "seg_id": seg_id,
+                "start_frame": s,
+                "end_frame": e,
+                "summary": best_summary,
+                "change_event_type": best_events,
+                "confidence": 1.0,
+            })
+            seg_id += 1
+
+    return {
+        "sample_id": sample_id,
+        "nframes": nframes,
+        "memory_segments": final_output,
     }

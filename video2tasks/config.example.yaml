@@ -63,6 +63,22 @@ windowing:
 segmentation:
   mode: "coarse"  # Options: "coarse", "fine"
 
+# Annotation targets
+# subtask: produce InfiData subtask segments
+# memory: produce long-term memory_segments for MEM training
+annotation:
+  targets:
+    - "subtask"
+    # - "memory"
+
+# InfiData write-back
+# When enabled for format: infidata datasets, results are merged back into:
+#   <dataset>/meta/segments.jsonl
+#   <dataset>/meta/memory_segments.jsonl
+infidata:
+  write_back: false
+  update_parquet_subtasks: false
+
 # Progress configuration
 progress:
   total_override: 0  # Override total sample count (0 = auto-detect)

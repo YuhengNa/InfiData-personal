@@ -16,7 +16,7 @@ import uvicorn
 from ..config import Config, DatasetConfig
 from .windowing import (
     read_video_info, build_windows, FrameExtractor,
-    build_segments_via_cuts, Window
+    build_segments_via_cuts, build_memory_segments_via_cuts, Window
 )
 
 
@@ -52,6 +52,46 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
             if line:
                 records.append(json.loads(line))
     return records
+
+
+def _write_jsonl(path: Path, records: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def _replace_episode_records(path: Path, new_records: List[Dict[str, Any]], episode_index: int) -> None:
+    existing = _load_jsonl(path) if path.exists() else []
+    kept = [r for r in existing if int(r.get("episode_index", -1)) != int(episode_index)]
+    merged = kept + new_records
+    merged.sort(key=lambda r: (int(r.get("episode_index", -1)), int(r.get("segment_index", -1))))
+    _write_jsonl(path, merged)
+
+
+def _update_episode_parquet_subtasks(data_dir: Path, source_meta: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
+    parquet_rel = source_meta.get("parquet_path")
+    if not parquet_rel:
+        print(f"[Warn] No parquet_path found for episode {source_meta.get('episode_index')}; skip parquet update")
+        return
+
+    parquet_path = data_dir / str(parquet_rel)
+    if not parquet_path.exists():
+        print(f"[Warn] Parquet not found: {parquet_path}")
+        return
+
+    import pandas as pd
+
+    df = pd.read_parquet(parquet_path)
+    if "frame_index" not in df.columns:
+        print(f"[Warn] frame_index column missing in {parquet_path}; skip parquet update")
+        return
+
+    for rec in records:
+        mask = (df["frame_index"] >= int(rec["start_frame"])) & (df["frame_index"] <= int(rec["end_frame"]))
+        df.loc[mask, "subtask"] = str(rec.get("subtask", ""))
+
+    df.to_parquet(parquet_path, index=False)
 
 
 def _parse_infidata_samples(data_dir: Path, video_key: str) -> tuple[List[str], Dict[str, str], Dict[str, Dict[str, Any]]]:
@@ -92,6 +132,8 @@ def _parse_infidata_samples(data_dir: Path, video_key: str) -> tuple[List[str], 
             "episode_index": episode_index,
             "task": ep.get("task", ""),
             "source_dataset": ep.get("source_dataset", ""),
+            "parquet_path": ep.get("parquet_path", ""),
+            "fps": ep.get("fps", None),
             "video_key": video_key,
             "video_path": str(video_path),
         }
@@ -174,6 +216,12 @@ def create_app(config: Config) -> FastAPI:
 
     def run_infidata_segments_path(run_dir: str) -> str:
         return str(Path(run_dir) / "segments_infidata.jsonl")
+
+    def memory_segments_path(samples_dir: str, sample_id: str) -> str:
+        return str(Path(sample_out_dir(samples_dir, sample_id)) / "memory_segments.jsonl")
+
+    def run_memory_segments_path(run_dir: str) -> str:
+        return str(Path(run_dir) / "memory_segments.jsonl")
     
     def done_marker_path(samples_dir: str, sample_id: str) -> str:
         return str(Path(sample_out_dir(samples_dir, sample_id)) / ".DONE")
@@ -247,6 +295,8 @@ def create_app(config: Config) -> FastAPI:
             f"FIXED={config.windowing.target_width}x{config.windowing.target_height}, "
             f"FRAMES_PER_WINDOW={config.windowing.frames_per_window}\n"
             f"[Plan] DATASETS={[(c.data_dir, c.subset, c.input_format) for c in dataset_ctxs]}\n"
+            f"[Plan] TARGETS={config.annotation.targets}, WRITE_BACK={config.infidata.write_back}, "
+            f"UPDATE_PARQUET_SUBTASKS={config.infidata.update_parquet_subtasks}\n"
             f"[Resume] Already done: {done}/{progress_total} (computed_total={total})"
         )
         
@@ -424,41 +474,92 @@ def create_app(config: Config) -> FastAPI:
                         if len(by_wid) >= len(windows):
                             print(f"[Finalize] {ctx.subset}/{sid}...")
                             
-                            final_res = build_segments_via_cuts(
-                                sid, windows, by_wid, fps, nframes,
-                                config.windowing.frames_per_window
-                            )
                             source_meta = ctx.sample_meta.get(sid, {})
-                            if source_meta:
-                                final_res["source_meta"] = source_meta
-                            
-                            with open(segments_path(ctx.samples_dir, sid), "w", encoding="utf-8") as f:
-                                json.dump(final_res, f, indent=2, ensure_ascii=False)
+                            episode_index = int(source_meta.get("episode_index", -1))
+                            task = str(source_meta.get("task", ""))
 
-                            if ctx.input_format == "infidata":
-                                infidata_records = []
-                                episode_index = int(source_meta.get("episode_index", -1))
-                                task = str(source_meta.get("task", ""))
-                                for seg in final_res.get("segments", []):
+                            if "subtask" in config.annotation.targets:
+                                final_res = build_segments_via_cuts(
+                                    sid, windows, by_wid, fps, nframes,
+                                    config.windowing.frames_per_window
+                                )
+                                if source_meta:
+                                    final_res["source_meta"] = source_meta
+
+                                with open(segments_path(ctx.samples_dir, sid), "w", encoding="utf-8") as f:
+                                    json.dump(final_res, f, indent=2, ensure_ascii=False)
+
+                                if ctx.input_format == "infidata":
+                                    infidata_records = []
+                                    for seg in final_res.get("segments", []):
+                                        start_frame = int(seg["start_frame"])
+                                        end_frame = max(start_frame, int(seg["end_frame"]) - 1)
+                                        infidata_records.append({
+                                            "episode_index": episode_index,
+                                            "segment_index": int(seg["seg_id"]),
+                                            "start_frame": start_frame,
+                                            "end_frame": end_frame,
+                                            "task": task,
+                                            "subtask": str(seg.get("instruction", "")),
+                                            "annotation_status": "vlm_pseudo",
+                                        })
+
+                                    _write_jsonl(Path(infidata_segments_path(ctx.samples_dir, sid)), infidata_records)
+                                    with open(run_infidata_segments_path(ctx.run_dir), "a", encoding="utf-8") as f:
+                                        for rec in infidata_records:
+                                            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+                                    if config.infidata.write_back:
+                                        _replace_episode_records(
+                                            Path(ctx.data_dir) / "meta" / "segments.jsonl",
+                                            infidata_records,
+                                            episode_index,
+                                        )
+                                        print(f"[WriteBack] Updated {ctx.subset}/meta/segments.jsonl for episode {episode_index}")
+
+                                    if config.infidata.write_back and config.infidata.update_parquet_subtasks:
+                                        _update_episode_parquet_subtasks(Path(ctx.data_dir), source_meta, infidata_records)
+                                        print(f"[WriteBack] Updated parquet subtask column for episode {episode_index}")
+
+                            if "memory" in config.annotation.targets:
+                                memory_res = build_memory_segments_via_cuts(
+                                    sid, windows, by_wid, fps, nframes,
+                                    config.windowing.frames_per_window
+                                )
+                                if source_meta:
+                                    memory_res["source_meta"] = source_meta
+
+                                memory_records = []
+                                for seg in memory_res.get("memory_segments", []):
                                     start_frame = int(seg["start_frame"])
                                     end_frame = max(start_frame, int(seg["end_frame"]) - 1)
-                                    infidata_records.append({
+                                    memory_records.append({
                                         "episode_index": episode_index,
                                         "segment_index": int(seg["seg_id"]),
                                         "start_frame": start_frame,
                                         "end_frame": end_frame,
+                                        "start_timestamp": float(start_frame / fps),
+                                        "end_timestamp": float(end_frame / fps),
                                         "task": task,
-                                        "subtask": str(seg.get("instruction", "")),
+                                        "summary": str(seg.get("summary", "")),
+                                        "change_event_type": seg.get("change_event_type", ["memory_updated"]),
+                                        "evidence_start_frame": start_frame,
+                                        "evidence_end_frame": end_frame,
                                         "annotation_status": "vlm_pseudo",
                                     })
 
-                                with open(infidata_segments_path(ctx.samples_dir, sid), "w", encoding="utf-8") as f:
-                                    for rec in infidata_records:
+                                _write_jsonl(Path(memory_segments_path(ctx.samples_dir, sid)), memory_records)
+                                with open(run_memory_segments_path(ctx.run_dir), "a", encoding="utf-8") as f:
+                                    for rec in memory_records:
                                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-                                with open(run_infidata_segments_path(ctx.run_dir), "a", encoding="utf-8") as f:
-                                    for rec in infidata_records:
-                                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                if config.infidata.write_back and ctx.input_format == "infidata":
+                                    _replace_episode_records(
+                                        Path(ctx.data_dir) / "meta" / "memory_segments.jsonl",
+                                        memory_records,
+                                        episode_index,
+                                    )
+                                    print(f"[WriteBack] Updated {ctx.subset}/meta/memory_segments.jsonl for episode {episode_index}")
                             
                             done_path = done_marker_path(ctx.samples_dir, sid)
                             already_done = Path(done_path).exists()

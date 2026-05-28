@@ -107,6 +107,48 @@ class SegmentationConfig(BaseModel):
         return aliases[key]
 
 
+class AnnotationConfig(BaseModel):
+    """Annotation heads to run for each video window."""
+    targets: List[str] = Field(
+        default_factory=lambda: ["subtask"],
+        description="Annotation targets: subtask, memory, or both",
+    )
+
+    @field_validator("targets", mode="before")
+    @classmethod
+    def normalize_targets(cls, v):
+        if isinstance(v, str):
+            return [v]
+        return v
+
+    @field_validator("targets")
+    @classmethod
+    def validate_targets(cls, v: List[str]) -> List[str]:
+        allowed = {"subtask", "memory"}
+        targets = []
+        for item in v:
+            key = str(item).lower()
+            if key not in allowed:
+                raise ValueError(f"annotation target must be one of {sorted(allowed)}, got {item}")
+            if key not in targets:
+                targets.append(key)
+        if not targets:
+            raise ValueError("annotation.targets must not be empty")
+        return targets
+
+
+class InfiDataConfig(BaseModel):
+    """Controls writing annotation results back into an InfiData dataset."""
+    write_back: bool = Field(
+        default=False,
+        description="Write generated annotations into <dataset>/meta JSONL files",
+    )
+    update_parquet_subtasks: bool = Field(
+        default=False,
+        description="Update each episode parquet subtask column from generated subtask segments",
+    )
+
+
 class ProgressConfig(BaseModel):
     """Progress tracking configuration."""
     total_override: int = Field(default=0, description="Override total count (0=auto)")
@@ -134,6 +176,8 @@ class Config(BaseModel):
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
     windowing: WindowingConfig = Field(default_factory=WindowingConfig)
     segmentation: SegmentationConfig = Field(default_factory=SegmentationConfig)
+    annotation: AnnotationConfig = Field(default_factory=AnnotationConfig)
+    infidata: InfiDataConfig = Field(default_factory=InfiDataConfig)
     progress: ProgressConfig = Field(default_factory=ProgressConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

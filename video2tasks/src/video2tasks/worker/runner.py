@@ -12,7 +12,7 @@ from PIL import Image
 
 from ..config import Config
 from ..vlm import create_backend
-from ..prompt import prompt_switch_detection
+from ..prompt import prompt_for_annotations
 
 MAX_LOCAL_RETRIES = 2
 
@@ -59,6 +59,7 @@ def run_worker(config: Config) -> None:
     backend = create_backend(config.worker.backend, **backend_kwargs)
     print(f"[Worker] Using backend: {backend.name}")
     print(f"[Worker] Segmentation mode: {config.segmentation.mode}")
+    print(f"[Worker] Annotation targets: {config.annotation.targets}")
     backend.warmup()
     
     print(f"[Worker] Connecting to {server_url}")
@@ -110,7 +111,11 @@ def run_worker(config: Config) -> None:
                         images.append(np.zeros((224, 224, 3), dtype=np.uint8))
                 
                 # Run inference with proper prompt (local retry on empty output)
-                prompt = prompt_switch_detection(len(images), mode=config.segmentation.mode)
+                prompt = prompt_for_annotations(
+                    len(images),
+                    segmentation_mode=config.segmentation.mode,
+                    targets=config.annotation.targets,
+                )
                 vlm_json: Dict[str, Any] = {}
                 
                 for attempt in range(MAX_LOCAL_RETRIES):
@@ -131,7 +136,13 @@ def run_worker(config: Config) -> None:
                 if _is_empty_vlm_json(vlm_json):
                     print(f"[Fail] {task_id} Returning empty to trigger server retry")
                 else:
-                    print(f"[Done] {task_id} ({len(images)}f) -> Cuts: {vlm_json.get('transitions', [])}")
+                    subtask_json = vlm_json.get("subtask", vlm_json)
+                    memory_json = vlm_json.get("memory", {})
+                    print(
+                        f"[Done] {task_id} ({len(images)}f) -> "
+                        f"Subtask cuts: {subtask_json.get('transitions', [])}; "
+                        f"Memory cuts: {memory_json.get('transitions', [])}"
+                    )
                 
                 # Submit result
                 requests.post(

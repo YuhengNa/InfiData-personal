@@ -6,6 +6,18 @@ def prompt_switch_detection(n_images: int, mode: str = "coarse") -> str:
     return prompt_object_switch_detection(n_images)
 
 
+def prompt_for_annotations(n_images: int, segmentation_mode: str = "coarse", targets=None) -> str:
+    targets = [str(t).lower() for t in (targets or ["subtask"])]
+    wants_subtask = "subtask" in targets
+    wants_memory = "memory" in targets
+
+    if wants_subtask and wants_memory:
+        return prompt_combined_annotation(n_images, segmentation_mode)
+    if wants_memory:
+        return prompt_memory_summary_detection(n_images)
+    return prompt_switch_detection(n_images, mode=segmentation_mode)
+
+
 def _strict_json_suffix() -> str:
     return (
         "### Output Format: Strict JSON\n"
@@ -14,6 +26,20 @@ def _strict_json_suffix() -> str:
         "- \"thought\": concise reasoning about the visible manipulation phases.\n"
         "- \"transitions\": a sorted list of image indices where a new segment starts.\n"
         "- \"instructions\": one short verb phrase for each segment. The number of instructions must equal len(transitions) + 1.\n"
+        "Use image indices, not timestamps. Valid indices are within the sampled image range.\n"
+    )
+
+
+def _memory_json_suffix(nested: bool = False) -> str:
+    prefix = "The memory object" if nested else "The JSON object"
+    return (
+        "### Output Format: Strict JSON\n"
+        "Return only valid JSON. Do not include markdown fences.\n"
+        f"{prefix} must contain:\n"
+        "- \"thought\": concise reasoning about persistent facts and memory changes.\n"
+        "- \"transitions\": a sorted list of image indices where a new memory segment starts.\n"
+        "- \"summaries\": one memory summary for each segment. The number of summaries must equal len(transitions) + 1.\n"
+        "- \"change_event_types\": one list of event tags for each segment.\n"
         "Use image indices, not timestamps. Valid indices are within the sampled image range.\n"
     )
 
@@ -92,5 +118,87 @@ def prompt_action_phase_detection(n_images: int) -> str:
         "  \"thought\": \"All images show the robot continuously smoothing the same cloth with the same intent. No stable phase change is visible.\",\n"
         "  \"transitions\": [],\n"
         "  \"instructions\": [\"Smooth the cloth\"]\n"
+        "}"
+    )
+
+
+def prompt_memory_summary_detection(n_images: int) -> str:
+    """Memory mode: split by long-term memory state changes."""
+    return (
+        f"You are creating long-term memory annotations for a {n_images}-frame robot manipulation clip.\n"
+        f"Mapping: image indices range from 0 to {n_images - 1}.\n\n"
+        "### Goal\n"
+        "Detect memory segment boundaries. A memory segment is a time interval where the policy should hold the same long-term memory summary.\n"
+        "The summary should contain persistent facts useful for future action, not a frame-by-frame caption.\n\n"
+        "### What Long-Term Memory Should Track\n"
+        "Write only facts that affect future decisions:\n"
+        "1. task progress and completed steps\n"
+        "2. hidden or occluded object locations\n"
+        "3. container, drawer, door, or tool states\n"
+        "4. counts and remaining objects\n"
+        "5. failed attempts and recovery needs\n"
+        "6. immediate next subgoal when useful\n\n"
+        "### When to Start a New Memory Segment\n"
+        "Mark a transition when a persistent fact becomes true, becomes false, or must be updated:\n"
+        "- an object is picked up, released, placed, inserted, removed, hidden, or revealed\n"
+        "- a drawer/container/door is opened or closed\n"
+        "- a subtask is completed and the next subgoal changes\n"
+        "- a count changes, such as one more block placed\n"
+        "- a grasp or attempt fails and the recovery strategy changes\n"
+        "Do not create a new memory segment for tiny motion, camera changes, or repeated adjustments when the memory summary remains the same.\n\n"
+        "### Summary Style\n"
+        "Each summary must be 1-4 short English sentences, ideally 10-60 words.\n"
+        "Use natural language only. Do not use labels like Progress:, Facts:, or Issues:.\n"
+        "Do not leak future information that is not true yet within that segment.\n"
+        "Prefer stable object names and spatial names, such as left drawer, red block, blue bowl.\n\n"
+        "### Event Tags\n"
+        "Use short snake_case tags such as initial_observation, object_location_seen, object_picked, object_placed, drawer_opened, drawer_closed, "
+        "container_opened, count_updated, subtask_completed, grasp_failed, recovery_needed, memory_unchanged.\n\n"
+        + _memory_json_suffix()
+        + "\n### Examples\n"
+        "{\n"
+        "  \"thought\": \"Images 0-3 show the red block inside the closed left drawer. Images 4-8 show the drawer being opened. Images 9-15 show the robot reaching toward the block inside the drawer.\",\n"
+        "  \"transitions\": [4, 9],\n"
+        "  \"summaries\": [\n"
+        "    \"The red block is in the left drawer. The drawer is closed. Next, open the left drawer.\",\n"
+        "    \"The red block is in the left drawer. The drawer is open. Next, reach into the left drawer.\",\n"
+        "    \"The red block is in the open left drawer. Next, grasp the red block.\"\n"
+        "  ],\n"
+        "  \"change_event_types\": [[\"initial_observation\", \"object_location_seen\"], [\"drawer_opened\"], [\"subtask_completed\"]]\n"
+        "}\n\n"
+        "{\n"
+        "  \"thought\": \"The robot continuously moves the block toward the bowl, but no persistent memory fact changes inside this sampled window.\",\n"
+        "  \"transitions\": [],\n"
+        "  \"summaries\": [\"The robot is holding the block. The bowl is the target location. Next, move the block to the bowl.\"],\n"
+        "  \"change_event_types\": [[\"memory_unchanged\"]]\n"
+        "}"
+    )
+
+
+def prompt_combined_annotation(n_images: int, segmentation_mode: str = "coarse") -> str:
+    subtask_prompt = prompt_switch_detection(n_images, mode=segmentation_mode)
+    memory_prompt = prompt_memory_summary_detection(n_images)
+    return (
+        f"You are annotating a {n_images}-frame robot manipulation clip for InfiData.\n"
+        f"Mapping: image indices range from 0 to {n_images - 1}.\n\n"
+        "Return both subtask segmentation and long-term memory segmentation in one strict JSON object.\n"
+        "Top-level keys must be \"subtask\" and \"memory\".\n\n"
+        "### Subtask Annotation Instructions\n"
+        + subtask_prompt
+        + "\n\n### Memory Annotation Instructions\n"
+        + memory_prompt
+        + "\n\n### Combined Output Format\n"
+        "{\n"
+        "  \"subtask\": {\n"
+        "    \"thought\": \"...\",\n"
+        "    \"transitions\": [4, 9],\n"
+        "    \"instructions\": [\"Reach for the shirt\", \"Grasp the shirt\", \"Fold the shirt\"]\n"
+        "  },\n"
+        "  \"memory\": {\n"
+        "    \"thought\": \"...\",\n"
+        "    \"transitions\": [9],\n"
+        "    \"summaries\": [\"The shirt is on the table. Next, grasp it.\", \"The robot is holding the shirt. Next, fold it.\"],\n"
+        "    \"change_event_types\": [[\"initial_observation\"], [\"object_picked\", \"subtask_completed\"]]\n"
+        "  }\n"
         "}"
     )
