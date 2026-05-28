@@ -1,0 +1,48 @@
+datasets:
+  - root: "/mnt/data/szeluresearch/InfiData/examples"
+    subset: "aloha_full"
+    format: "infidata"
+    video_key: "cam_high"
+
+run:
+  base_dir: "/mnt/data/szeluresearch/InfiData/video2tasks/runs"
+  run_id: "qwen3vl_aloha_cam_high_fine"
+
+server:
+  host: "127.0.0.1"
+  port: 8099
+  max_queue: 8
+  inflight_timeout_sec: 600.0
+  max_retries_per_job: 5
+  auto_exit_after_all_done: false
+
+worker:
+  server_url: "http://127.0.0.1:8099"
+  backend: "qwen3vl"
+
+  qwen3vl:
+    model_path: "Qwen/Qwen3-VL-8B-Instruct"
+    device_map: "auto"
+
+  remote_api:
+    api_url: "http://127.0.0.1:8080/infer"
+    api_key: ""
+    timeout_sec: 60.0
+    headers: {}
+
+windowing:
+  window_sec: 16.0
+  step_sec: 8.0
+  frames_per_window: 16
+  target_width: 720
+  target_height: 480
+  png_compression: 0
+
+segmentation:
+  mode: "fine"
+
+progress:
+  total_override: 0
+
+logging:
+  level: "INFO"
