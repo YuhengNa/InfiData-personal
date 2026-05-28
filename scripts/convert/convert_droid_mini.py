@@ -15,6 +15,8 @@ CAMERA_MAP = {
     "cam_right_wrist": "observation.images.exterior_2_left",
 }
 
+MISSING_VIDEO_WARNED = set()
+
 
 def speed_bin_from_T(T: int, bin_size: int = 500) -> int:
     return int(round(T / bin_size) * bin_size)
@@ -26,20 +28,24 @@ def parse_file_index_from_name(path: Path) -> int:
     return int(stem.split("-")[-1])
 
 
-def safe_symlink_or_copy(src: Path, dst: Path, copy_video: bool = False) -> None:
+def safe_symlink_or_copy(src: Path, dst: Path, copy_video: bool = False) -> bool:
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     if dst.exists() or dst.is_symlink():
-        return
+        return True
 
     if not src.exists():
-        print(f"[WARN] video not found: {src}")
-        return
+        key = str(src)
+        if key not in MISSING_VIDEO_WARNED:
+            print(f"[WARN] video not found: {src}")
+            MISSING_VIDEO_WARNED.add(key)
+        return False
 
     if copy_video:
         shutil.copy2(src, dst)
     else:
         os.symlink(src.resolve(), dst)
+    return True
 
 
 def make_placeholder_segments(T: int, task: str):
@@ -120,10 +126,8 @@ def pick_action(df: pd.DataFrame) -> pd.Series:
     raise KeyError("Cannot find action fields in DROID parquet.")
 
 
-def collect_episodes_streaming(data_files, num_episodes: int):
-    buffers = {}
-    completed = []
-
+def iter_episode_groups(data_files):
+    """Yield episode dataframes one by one to keep memory usage bounded."""
     for data_file in tqdm(data_files, desc="Scanning DROID parquet"):
         file_idx = parse_file_index_from_name(data_file)
         df = pd.read_parquet(data_file)
@@ -137,26 +141,7 @@ def collect_episodes_streaming(data_files, num_episodes: int):
         df["_source_file_index"] = file_idx
 
         for ep_idx, g in df.groupby("episode_index", sort=False):
-            if ep_idx not in buffers:
-                buffers[ep_idx] = []
-            buffers[ep_idx].append(g)
-
-            # If any frame marks is_last=True, treat episode as complete.
-            if "is_last" in g.columns and bool(g["is_last"].astype(bool).any()):
-                ep_df = pd.concat(buffers.pop(ep_idx), ignore_index=True)
-                completed.append((int(ep_idx), ep_df))
-                if len(completed) >= num_episodes:
-                    return completed
-
-    # Fallback if is_last not reliable: emit in first-seen order.
-    if len(completed) < num_episodes:
-        for ep_idx, chunks in buffers.items():
-            ep_df = pd.concat(chunks, ignore_index=True)
-            completed.append((int(ep_idx), ep_df))
-            if len(completed) >= num_episodes:
-                break
-
-    return completed
+            yield int(ep_idx), g.reset_index(drop=True)
 
 
 def convert_episode(
@@ -196,8 +181,8 @@ def convert_episode(
             src = droid_root / "videos" / droid_cam / "chunk-000" / f"file-{file_idx:03d}.mp4"
             dst_name = f"file-{file_idx:03d}_{infi_cam}.mp4"
             dst = out_root / "videos" / "droid" / dst_name
-            safe_symlink_or_copy(src, dst, copy_video=copy_video)
-            linked_video[file_idx][infi_cam] = str(Path("videos") / "droid" / dst_name)
+            ok = safe_symlink_or_copy(src, dst, copy_video=copy_video)
+            linked_video[file_idx][infi_cam] = str(Path("videos") / "droid" / dst_name) if ok else None
 
     rows = []
     for local_idx, (_, r) in enumerate(ep_df.iterrows()):
@@ -332,6 +317,7 @@ def main():
     parser.add_argument("--droid_root", type=str, required=True)
     parser.add_argument("--out_root", type=str, default="examples/droid_mini")
     parser.add_argument("--num_episodes", type=int, default=3)
+    parser.add_argument("--all_episodes", action="store_true", help="convert all episodes found in droid_root")
     parser.add_argument("--copy_video", action="store_true", help="copy videos instead of symlink")
     args = parser.parse_args()
 
@@ -348,18 +334,29 @@ def main():
         raise FileNotFoundError(f"No parquet files found under {data_dir}")
 
     print(f"[INFO] Found {len(data_files)} DROID parquet files")
-    selected = collect_episodes_streaming(data_files, args.num_episodes)
-    if not selected:
-        raise RuntimeError("No episodes collected from DROID parquet files")
-
-    selected = selected[: args.num_episodes]
-    print(f"[INFO] Converting {len(selected)} episodes")
+    target_eps = None if args.all_episodes else args.num_episodes
+    if target_eps is None:
+        print("[INFO] Converting all episodes")
+    else:
+        print(f"[INFO] Converting up to {target_eps} episodes")
 
     all_episode_meta = []
     all_segment_meta = []
     all_stats = []
 
-    for new_ep_idx, (source_ep_idx, ep_df) in enumerate(tqdm(selected, desc="Converting episodes")):
+    converted = 0
+    for source_ep_idx, ep_df in iter_episode_groups(data_files):
+        if target_eps is not None and converted >= target_eps:
+            break
+
+        new_ep_idx = converted
+
+        # Resume-safe: skip if parquet already exists.
+        expected_parquet = out_root / "data" / "droid" / "chunk-000" / f"episode_{new_ep_idx:06d}.parquet"
+        if expected_parquet.exists():
+            converted += 1
+            continue
+
         ep_meta, seg_meta, stats = convert_episode(
             ep_df=ep_df,
             source_episode_index=source_ep_idx,
@@ -372,6 +369,19 @@ def main():
         all_episode_meta.append(ep_meta)
         all_segment_meta.extend(seg_meta)
         all_stats.append(stats)
+        converted += 1
+
+        if converted % 1000 == 0:
+            print(f"[INFO] Converted {converted} episodes so far")
+
+    if converted == 0:
+        raise RuntimeError("No episodes converted from DROID parquet files")
+
+    # If resume skipped existing parquet files, rebuild metadata from converted subset only is not enough.
+    # For full conversion runs, recommend using a clean out_root.
+    if converted != len(all_episode_meta):
+        print("[WARN] Some episodes were skipped because output parquet already existed.")
+        print("[WARN] Metadata files now contain only episodes converted in this run.")
 
     tasks = {}
     unique_tasks = sorted(set(x["task"] for x in all_episode_meta))
@@ -409,7 +419,7 @@ def main():
     write_json(out_root / "meta" / "stats.json", dataset_stats)
     write_readme(out_root, len(all_episode_meta), fps)
 
-    print("\n[DONE] DROID mini dataset built.")
+    print("\n[DONE] DROID dataset conversion finished for this run.")
     print(f"Output: {out_root}")
 
 

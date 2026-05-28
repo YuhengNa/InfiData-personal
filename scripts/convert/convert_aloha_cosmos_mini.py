@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -54,6 +55,24 @@ def safe_symlink_or_copy(src: Path, dst: Path, copy_video=False):
 def find_hdf5_files(root: Path):
     files = sorted(list(root.rglob("*.hdf5")) + list(root.rglob("*.h5")))
     return files
+
+
+def infer_task_from_h5_path(h5_path: Path, aloha_root: Path):
+    """Infer canonical task text from preprocessed dataset folder name."""
+    try:
+        rel = h5_path.resolve().relative_to(aloha_root.resolve())
+        # Expected: <task_folder>/train/episode_x.hdf5
+        if len(rel.parts) >= 3:
+            task_folder = rel.parts[0]
+        else:
+            task_folder = h5_path.parents[1].name
+    except Exception:
+        task_folder = h5_path.parents[1].name
+
+    # Remove split/count suffixes such as _demos_1000_steps_each_pt1
+    task_core = re.sub(r"_demos_.*$", "", task_folder)
+    task_text = task_core.replace("_", " ").strip()
+    return task_text if task_text else "aloha manipulation task"
 
 
 def read_video_paths(f, h5_path: Path):
@@ -302,7 +321,9 @@ def main():
     parser.add_argument("--aloha_root", type=str, required=True)
     parser.add_argument("--out_root", type=str, default="my_pi07_dataset_mini")
     parser.add_argument("--num_episodes", type=int, default=3)
+    parser.add_argument("--all_episodes", action="store_true", help="convert all episodes under aloha_root")
     parser.add_argument("--task", type=str, default="aloha manipulation task")
+    parser.add_argument("--task_mode", type=str, default="auto", choices=["auto", "fixed"], help="auto: infer task from folder name; fixed: use --task for all episodes")
     parser.add_argument("--copy_video", action="store_true", help="copy videos instead of symlink")
     args = parser.parse_args()
 
@@ -313,7 +334,7 @@ def main():
     if len(h5_files) == 0:
         raise FileNotFoundError(f"No hdf5/h5 files found under {aloha_root}")
 
-    selected = h5_files[: args.num_episodes]
+    selected = h5_files if args.all_episodes else h5_files[: args.num_episodes]
 
     print(f"[INFO] Found {len(h5_files)} HDF5 files")
     print(f"[INFO] Converting {len(selected)} episodes")
@@ -324,11 +345,12 @@ def main():
     all_stats = []
 
     for new_idx, h5_path in enumerate(tqdm(selected)):
+        task_text = args.task if args.task_mode == "fixed" else infer_task_from_h5_path(h5_path, aloha_root)
         ep_meta, seg_meta, stats = convert_one_episode(
             h5_path=h5_path,
             out_root=out_root,
             new_episode_index=new_idx,
-            task=args.task,
+            task=task_text,
             copy_video=args.copy_video,
         )
         all_episode_meta.append(ep_meta)
@@ -338,13 +360,14 @@ def main():
     write_jsonl(out_root / "meta" / "episodes.jsonl", all_episode_meta)
     write_jsonl(out_root / "meta" / "segments.jsonl", all_segment_meta)
 
-    tasks = {
-        "0": {
-            "task": args.task,
+    unique_tasks = sorted(set(x["task"] for x in all_episode_meta))
+    tasks = {}
+    for i, task_name in enumerate(unique_tasks):
+        tasks[str(i)] = {
+            "task": task_name,
             "source_dataset": "ALOHA-Cosmos-Policy",
-            "note": "Task name provided by CLI. Replace with actual task labels if available.",
+            "note": "Task inferred from source folder name when task_mode=auto.",
         }
-    }
 
     robots = {
         "aloha2_bimanual_viperx": {

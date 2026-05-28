@@ -1,0 +1,4 @@
+{"start_frame": 0, "end_frame": 16, "task": "pick the shrimp then place it in the grey bowl", "subtask": "approach the object", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 0}
+{"start_frame": 17, "end_frame": 34, "task": "pick the shrimp then place it in the grey bowl", "subtask": "grasp or establish contact", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 1}
+{"start_frame": 35, "end_frame": 52, "task": "pick the shrimp then place it in the grey bowl", "subtask": "perform the main manipulation", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 2}
+{"start_frame": 53, "end_frame": 70, "task": "pick the shrimp then place it in the grey bowl", "subtask": "finish the task", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 3}

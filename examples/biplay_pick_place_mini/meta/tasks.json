@@ -1,0 +1,7 @@
+{
+  "0": {
+    "task": "pick the shrimp then place it in the grey bowl",
+    "source_dataset": "BiPlay",
+    "note": "Task inferred from TFRecord language fields or dataset name."
+  }
+}

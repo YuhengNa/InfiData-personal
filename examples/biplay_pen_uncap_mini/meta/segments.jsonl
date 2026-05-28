@@ -1,0 +1,4 @@
+{"start_frame": 0, "end_frame": 74, "task": "uncap the pen", "subtask": "approach the object", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 0}
+{"start_frame": 75, "end_frame": 149, "task": "uncap the pen", "subtask": "grasp or establish contact", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 1}
+{"start_frame": 150, "end_frame": 224, "task": "uncap the pen", "subtask": "perform the main manipulation", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 2}
+{"start_frame": 225, "end_frame": 299, "task": "uncap the pen", "subtask": "finish the task", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 3}

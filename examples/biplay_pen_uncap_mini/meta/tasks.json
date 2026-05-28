@@ -1,0 +1,7 @@
+{
+  "0": {
+    "task": "uncap the pen",
+    "source_dataset": "BiPlay",
+    "note": "Task inferred from BiPlay subset name when no explicit language instruction is present in raw HDF5."
+  }
+}
