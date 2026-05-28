@@ -57,6 +57,12 @@ windowing:
   target_height: 480     # Target frame height
   png_compression: 0     # PNG compression level (0-9)
 
+# Segmentation mode
+# coarse: split only when the manipulated object changes
+# fine: split by action/manipulation phases for InfiData subtasks
+segmentation:
+  mode: "coarse"  # Options: "coarse", "fine"
+
 # Progress configuration
 progress:
   total_override: 0  # Override total sample count (0 = auto-detect)

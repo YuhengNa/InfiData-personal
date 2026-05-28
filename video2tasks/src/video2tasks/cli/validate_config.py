@@ -24,6 +24,7 @@ def main(config: Path) -> None:
         click.echo(f"  Run base: {cfg.run.base_dir}")
         click.echo(f"  Server: {cfg.server.host}:{cfg.server.port}")
         click.echo(f"  Worker backend: {cfg.worker.backend}")
+        click.echo(f"  Segmentation mode: {cfg.segmentation.mode}")
         click.echo(f"  Windowing: {cfg.windowing.frames_per_window} frames per window")
         sys.exit(0)
     except Exception as e:

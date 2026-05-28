@@ -84,6 +84,29 @@ class WindowingConfig(BaseModel):
     png_compression: int = Field(default=0, description="PNG compression level (0-9)")
 
 
+class SegmentationConfig(BaseModel):
+    """Subtask segmentation behavior."""
+    mode: str = Field(
+        default="coarse",
+        description="Segmentation mode: coarse/object_switch or fine/action_phase",
+    )
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        aliases = {
+            "coarse": "coarse",
+            "object_switch": "coarse",
+            "fine": "fine",
+            "action_phase": "fine",
+        }
+        key = v.lower()
+        if key not in aliases:
+            allowed = sorted(aliases)
+            raise ValueError(f"mode must be one of {allowed}, got {v}")
+        return aliases[key]
+
+
 class ProgressConfig(BaseModel):
     """Progress tracking configuration."""
     total_override: int = Field(default=0, description="Override total count (0=auto)")
@@ -110,6 +133,7 @@ class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
     windowing: WindowingConfig = Field(default_factory=WindowingConfig)
+    segmentation: SegmentationConfig = Field(default_factory=SegmentationConfig)
     progress: ProgressConfig = Field(default_factory=ProgressConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
@@ -157,6 +181,8 @@ class Config(BaseModel):
             if not isinstance(headers, dict):
                 raise ValueError("REMOTE_API_HEADERS must be a JSON object")
             config.worker.remote_api.headers = headers
+        if "SEGMENTATION_MODE" in os.environ:
+            config.segmentation.mode = SegmentationConfig(mode=os.environ["SEGMENTATION_MODE"]).mode
         
         return config
     

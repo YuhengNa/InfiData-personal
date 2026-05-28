@@ -58,6 +58,7 @@ def run_worker(config: Config) -> None:
     
     backend = create_backend(config.worker.backend, **backend_kwargs)
     print(f"[Worker] Using backend: {backend.name}")
+    print(f"[Worker] Segmentation mode: {config.segmentation.mode}")
     backend.warmup()
     
     print(f"[Worker] Connecting to {server_url}")
@@ -109,7 +110,7 @@ def run_worker(config: Config) -> None:
                         images.append(np.zeros((224, 224, 3), dtype=np.uint8))
                 
                 # Run inference with proper prompt (local retry on empty output)
-                prompt = prompt_switch_detection(len(images))
+                prompt = prompt_switch_detection(len(images), mode=config.segmentation.mode)
                 vlm_json: Dict[str, Any] = {}
                 
                 for attempt in range(MAX_LOCAL_RETRIES):
