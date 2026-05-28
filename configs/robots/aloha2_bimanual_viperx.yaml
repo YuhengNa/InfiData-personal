@@ -1,0 +1,13 @@
+robot_type: aloha2_bimanual_viperx
+domain: real
+state_dim: 14
+action_dim: 14
+control_modes:
+  - joint
+fps: 25
+cameras:
+  - cam_high
+  - cam_left_wrist
+  - cam_right_wrist
+state_description: "14D joint positions (7 per arm)"
+action_description: "14D absolute joint-position action (7 per arm)"

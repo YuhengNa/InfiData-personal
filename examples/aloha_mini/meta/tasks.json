@@ -1,0 +1,7 @@
+{
+  "0": {
+    "task": "put candies in bowl",
+    "source_dataset": "ALOHA-Cosmos-Policy",
+    "note": "Task name provided by CLI. Replace with actual task labels if available."
+  }
+}

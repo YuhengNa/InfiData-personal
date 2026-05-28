@@ -1,0 +1,17 @@
+{
+  "franka": {
+    "robot_type": "franka",
+    "domain": "real",
+    "state_dim": 8,
+    "action_dim": 8,
+    "control_mode": "joint",
+    "fps": 15,
+    "cameras": [
+      "cam_high",
+      "cam_left_wrist",
+      "cam_right_wrist"
+    ],
+    "state_description": "DROID observation.state (joint + gripper)",
+    "action_description": "DROID action"
+  }
+}

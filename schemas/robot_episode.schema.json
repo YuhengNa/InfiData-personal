@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PI07 / InfiData Robot Episode Row Schema",
+  "type": "object",
+  "required": [
+    "episode_index", "frame_index", "timestamp", "observation.state",
+    "action", "task", "subtask", "robot_type", "control_mode",
+    "quality", "speed_bin", "mistake", "success", "source_dataset"
+  ],
+  "properties": {
+    "episode_index": { "type": "integer" },
+    "frame_index": { "type": "integer" },
+    "timestamp": { "type": "number" },
+    "observation.state": { "type": "array", "items": { "type": "number" } },
+    "observation.qvel": { "type": "array", "items": { "type": "number" } },
+    "observation.effort": { "type": "array", "items": { "type": "number" } },
+    "action": { "type": "array", "items": { "type": "number" } },
+    "action_relative": { "type": "array", "items": { "type": "number" } },
+    "task": { "type": "string" },
+    "subtask": { "type": "string" },
+    "robot_type": { "type": "string" },
+    "control_mode": { "type": "string", "enum": ["joint", "ee", "unknown"] },
+    "quality": { "type": "integer", "minimum": 1, "maximum": 5 },
+    "speed_bin": { "type": "integer" },
+    "mistake": { "type": "boolean" },
+    "success": { "type": "boolean" },
+    "source_dataset": { "type": "string" },
+    "domain": { "type": "string", "enum": ["real", "sim"] },
+    "video.cam_high.path": { "type": "string" },
+    "video.cam_high.frame_index": { "type": "integer" },
+    "video.cam_left_wrist.path": { "type": "string" },
+    "video.cam_left_wrist.frame_index": { "type": "integer" },
+    "video.cam_right_wrist.path": { "type": "string" },
+    "video.cam_right_wrist.frame_index": { "type": "integer" },
+    "subgoal.real_future.cam_high.path": { "type": "string" },
+    "subgoal.real_future.cam_high.frame_index": { "type": "integer" },
+    "subgoal.real_future.cam_left_wrist.path": { "type": "string" },
+    "subgoal.real_future.cam_left_wrist.frame_index": { "type": "integer" },
+    "subgoal.real_future.cam_right_wrist.path": { "type": "string" },
+    "subgoal.real_future.cam_right_wrist.frame_index": { "type": "integer" }
+  }
+}

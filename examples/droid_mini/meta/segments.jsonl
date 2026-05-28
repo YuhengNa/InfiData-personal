@@ -1,0 +1,12 @@
+{"start_frame": 0, "end_frame": 40, "task": "droid manipulation task", "subtask": "approach the target object", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 0}
+{"start_frame": 41, "end_frame": 82, "task": "droid manipulation task", "subtask": "grasp or manipulate the object", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 1}
+{"start_frame": 83, "end_frame": 124, "task": "droid manipulation task", "subtask": "move toward the target location", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 2}
+{"start_frame": 125, "end_frame": 166, "task": "droid manipulation task", "subtask": "finish the task", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 3}
+{"start_frame": 0, "end_frame": 65, "task": "Put the blue block in the green bowl", "subtask": "approach the target object", "annotation_status": "auto_placeholder", "episode_index": 1, "segment_index": 0}
+{"start_frame": 66, "end_frame": 132, "task": "Put the blue block in the green bowl", "subtask": "grasp or manipulate the object", "annotation_status": "auto_placeholder", "episode_index": 1, "segment_index": 1}
+{"start_frame": 133, "end_frame": 198, "task": "Put the blue block in the green bowl", "subtask": "move toward the target location", "annotation_status": "auto_placeholder", "episode_index": 1, "segment_index": 2}
+{"start_frame": 199, "end_frame": 265, "task": "Put the blue block in the green bowl", "subtask": "finish the task", "annotation_status": "auto_placeholder", "episode_index": 1, "segment_index": 3}
+{"start_frame": 0, "end_frame": 101, "task": "Move the bottom right tip of the duvet to the left", "subtask": "approach the target object", "annotation_status": "auto_placeholder", "episode_index": 2, "segment_index": 0}
+{"start_frame": 102, "end_frame": 204, "task": "Move the bottom right tip of the duvet to the left", "subtask": "grasp or manipulate the object", "annotation_status": "auto_placeholder", "episode_index": 2, "segment_index": 1}
+{"start_frame": 205, "end_frame": 307, "task": "Move the bottom right tip of the duvet to the left", "subtask": "move toward the target location", "annotation_status": "auto_placeholder", "episode_index": 2, "segment_index": 2}
+{"start_frame": 308, "end_frame": 410, "task": "Move the bottom right tip of the duvet to the left", "subtask": "finish the task", "annotation_status": "auto_placeholder", "episode_index": 2, "segment_index": 3}

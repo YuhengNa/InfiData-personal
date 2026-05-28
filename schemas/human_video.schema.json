@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Human Video Clip Schema (Category 5-6)",
+  "description": "人类第一人称/第三人称视频数据 schema，用于世界模型、subgoal 生成和视觉-语言对齐",
+  "type": "object",
+  "required": [
+    "sample_id", "video_index", "clip_index", "frame_index", "timestamp",
+    "video.path", "camera_view", "task", "source_dataset"
+  ],
+  "properties": {
+    "sample_id": { "type": "string" },
+    "video_index": { "type": "integer" },
+    "clip_index": { "type": "integer" },
+    "frame_index": { "type": "integer" },
+    "timestamp": { "type": "number" },
+    
+    "video": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "frame_index": { "type": "integer" }
+      },
+      "required": ["path"]
+    },
+    
+    "camera_view": { 
+      "type": "string",
+      "enum": ["egocentric", "third_person"]
+    },
+    
+    "task": { "type": "string" },
+    "subtask": { "type": "string" },
+    "narration": { "type": "string" },
+    "action_verb": { "type": "string" },
+    "target_object": { "type": "string" },
+    
+    "objects": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    
+    "caption": { "type": "string" },
+    "scene_type": { "type": "string" },
+    "source_dataset": { "type": "string" },
+    "source_url": { "type": "string" },
+    
+    "annotation_status": { 
+      "type": "string",
+      "enum": ["auto", "vlm_pseudo", "human_labeled", "reviewed", "approved"]
+    }
+  }
+}

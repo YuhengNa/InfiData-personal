@@ -1,0 +1,17 @@
+{
+  "0": {
+    "task": "Move the bottom right tip of the duvet to the left",
+    "source_dataset": "DROID",
+    "note": "Task text inferred from language_instruction/task_category"
+  },
+  "1": {
+    "task": "Put the blue block in the green bowl",
+    "source_dataset": "DROID",
+    "note": "Task text inferred from language_instruction/task_category"
+  },
+  "2": {
+    "task": "droid manipulation task",
+    "source_dataset": "DROID",
+    "note": "Task text inferred from language_instruction/task_category"
+  }
+}

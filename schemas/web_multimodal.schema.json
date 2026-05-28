@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Web Multimodal Schema (Category 7)",
+  "description": "网页图像/视频/VQA/字幕等多模态数据 schema，用于 VLM 预训练和视觉-语言对齐",
+  "type": "object",
+  "required": [
+    "sample_id", "modality", "task_type", "source_dataset"
+  ],
+  "properties": {
+    "sample_id": { "type": "string" },
+    "modality": { 
+      "type": "string",
+      "enum": ["image", "video", "text", "image_text", "video_text"]
+    },
+    "task_type": { 
+      "type": "string",
+      "enum": ["vqa", "captioning", "object_localization", "attribute_prediction", "video_captioning", "text_instruction"]
+    },
+    
+    "image": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" }
+      }
+    },
+    "video": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "frame_index": { "type": "integer" }
+      }
+    },
+    
+    "question": { "type": "string" },
+    "answer": { "type": "string" },
+    "caption": { "type": "string" },
+    
+    "object_boxes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "object": { "type": "string" },
+          "bbox": { "type": "array", "items": { "type": "number" } }
+        }
+      }
+    },
+    
+    "attributes": { "type": "object" },
+    "objects": { "type": "array", "items": { "type": "string" } },
+    
+    "task": { "type": "string" },
+    "subtask": { "type": "string" },
+    "source_dataset": { "type": "string" },
+    "source_url": { "type": "string" },
+    
+    "annotation_status": { 
+      "type": "string",
+      "enum": ["auto", "vlm_pseudo", "human_labeled", "reviewed", "approved"]
+    }
+  }
+}

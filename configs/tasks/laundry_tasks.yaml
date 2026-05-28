@@ -1,0 +1,13 @@
+tasks:
+  - canonical_name: fold shirt
+    category: laundry
+    aliases:
+      - fold_shirt
+      - shirt folding
+    possible_subtasks:
+      - reach for the shirt
+      - grasp the shirt corners
+      - lift the shirt
+      - fold the shirt
+      - smooth the folded shirt
+      - finish the task

@@ -1,0 +1,12 @@
+{"start_frame": 0, "end_frame": 374, "task": "put candies in bowl", "subtask": "approach the target object", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 0}
+{"start_frame": 375, "end_frame": 749, "task": "put candies in bowl", "subtask": "grasp or manipulate the object", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 1}
+{"start_frame": 750, "end_frame": 1124, "task": "put candies in bowl", "subtask": "move toward the target location", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 2}
+{"start_frame": 1125, "end_frame": 1499, "task": "put candies in bowl", "subtask": "finish the task", "annotation_status": "auto_placeholder", "episode_index": 0, "segment_index": 3}
+{"start_frame": 0, "end_frame": 374, "task": "put candies in bowl", "subtask": "approach the target object", "annotation_status": "auto_placeholder", "episode_index": 1, "segment_index": 0}
+{"start_frame": 375, "end_frame": 749, "task": "put candies in bowl", "subtask": "grasp or manipulate the object", "annotation_status": "auto_placeholder", "episode_index": 1, "segment_index": 1}
+{"start_frame": 750, "end_frame": 1124, "task": "put candies in bowl", "subtask": "move toward the target location", "annotation_status": "auto_placeholder", "episode_index": 1, "segment_index": 2}
+{"start_frame": 1125, "end_frame": 1499, "task": "put candies in bowl", "subtask": "finish the task", "annotation_status": "auto_placeholder", "episode_index": 1, "segment_index": 3}
+{"start_frame": 0, "end_frame": 374, "task": "put candies in bowl", "subtask": "approach the target object", "annotation_status": "auto_placeholder", "episode_index": 2, "segment_index": 0}
+{"start_frame": 375, "end_frame": 749, "task": "put candies in bowl", "subtask": "grasp or manipulate the object", "annotation_status": "auto_placeholder", "episode_index": 2, "segment_index": 1}
+{"start_frame": 750, "end_frame": 1124, "task": "put candies in bowl", "subtask": "move toward the target location", "annotation_status": "auto_placeholder", "episode_index": 2, "segment_index": 2}
+{"start_frame": 1125, "end_frame": 1499, "task": "put candies in bowl", "subtask": "finish the task", "annotation_status": "auto_placeholder", "episode_index": 2, "segment_index": 3}
