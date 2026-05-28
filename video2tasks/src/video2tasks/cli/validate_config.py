@@ -29,6 +29,7 @@ def main(config: Path) -> None:
         click.echo(f"  InfiData write back: {cfg.infidata.write_back}")
         click.echo(f"  Update parquet subtasks: {cfg.infidata.update_parquet_subtasks}")
         click.echo(f"  Memory uses subtask context: {cfg.memory.use_subtask_context}")
+        click.echo(f"  Memory aligns to subtasks: {cfg.memory.align_to_subtasks}")
         click.echo(f"  Visualization enabled: {cfg.visualization.enabled}")
         click.echo(f"  Windowing: {cfg.windowing.frames_per_window} frames per window")
         sys.exit(0)

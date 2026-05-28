@@ -155,6 +155,10 @@ class MemoryConfig(BaseModel):
         default=True,
         description="Include existing subtask segments in memory prompts when available",
     )
+    align_to_subtasks: bool = Field(
+        default=True,
+        description="Use existing subtask boundaries as memory segment boundaries when available",
+    )
 
 
 class VisualizationConfig(BaseModel):

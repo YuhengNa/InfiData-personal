@@ -105,6 +105,53 @@ def _segments_for_window(records: List[Dict[str, Any]], start_frame: int, end_fr
     return selected
 
 
+def _memory_records_from_subtasks(
+    subtask_records: List[Dict[str, Any]],
+    memory_records: List[Dict[str, Any]],
+    episode_index: int,
+    task: str,
+    fps: float,
+) -> List[Dict[str, Any]]:
+    """Project window-derived memory summaries onto existing subtask intervals."""
+    if not subtask_records or not memory_records:
+        return memory_records
+
+    aligned = []
+    for idx, sub in enumerate(subtask_records):
+        start_frame = int(sub.get("start_frame", 0))
+        end_frame = int(sub.get("end_frame", start_frame))
+        mid_frame = (start_frame + end_frame) // 2
+        active_memory = None
+        for mem in memory_records:
+            if int(mem.get("start_frame", 0)) <= mid_frame <= int(mem.get("end_frame", -1)):
+                active_memory = mem
+                break
+        if active_memory is None:
+            active_memory = memory_records[min(idx, len(memory_records) - 1)]
+
+        events = active_memory.get("change_event_type", ["memory_updated"])
+        if isinstance(events, str):
+            events = [events]
+
+        aligned.append({
+            "episode_index": episode_index,
+            "segment_index": idx,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "start_timestamp": float(start_frame / fps),
+            "end_timestamp": float(end_frame / fps),
+            "task": task,
+            "summary": str(active_memory.get("summary", "")),
+            "change_event_type": events,
+            "evidence_start_frame": int(active_memory.get("evidence_start_frame", start_frame)),
+            "evidence_end_frame": int(active_memory.get("evidence_end_frame", end_frame)),
+            "annotation_status": "vlm_pseudo",
+            "aligned_to_subtask": True,
+            "subtask": str(sub.get("subtask", "")),
+        })
+    return aligned
+
+
 def _update_episode_parquet_subtasks(data_dir: Path, source_meta: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
     parquet_rel = source_meta.get("parquet_path")
     if not parquet_rel:
@@ -640,6 +687,15 @@ def create_app(config: Config) -> FastAPI:
                                         "evidence_end_frame": end_frame,
                                         "annotation_status": "vlm_pseudo",
                                     })
+
+                                if config.memory.align_to_subtasks and ctx.sample_subtasks.get(sid):
+                                    memory_records = _memory_records_from_subtasks(
+                                        ctx.sample_subtasks[sid],
+                                        memory_records,
+                                        episode_index,
+                                        task,
+                                        fps,
+                                    )
 
                                 _write_jsonl(Path(memory_segments_path(ctx.samples_dir, sid)), memory_records)
                                 memory_records_for_viz = memory_records

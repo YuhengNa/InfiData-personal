@@ -82,6 +82,7 @@ infidata:
 # Memory annotation options
 memory:
   use_subtask_context: true
+  align_to_subtasks: true
 
 # Visualization options
 # Renders annotated videos with subtask and memory timelines.
