@@ -26,6 +26,15 @@ def decode_b64_to_numpy(b64_str: str) -> Optional[np.ndarray]:
     if not b64_str:
         return None
 
+    try:
+        img_bytes = base64.b64decode(b64_str)
+        img = Image.open(BytesIO(img_bytes)).convert("RGB")
+        # Convert RGB to BGR for OpenCV compatibility.
+        rgb_array = np.array(img)
+        return rgb_array[:, :, ::-1]
+    except Exception:
+        return None
+
 
 def format_subtask_context(meta: Dict[str, Any]) -> str:
     segments = meta.get("subtask_segments") or []
@@ -41,16 +50,6 @@ def format_subtask_context(meta: Dict[str, Any]) -> str:
             f"- frames {seg.get('start_frame')}-{seg.get('end_frame')}: {seg.get('subtask', '')}"
         )
     return "\n".join(lines)
-    
-    try:
-        img_bytes = base64.b64decode(b64_str)
-        img = Image.open(BytesIO(img_bytes)).convert("RGB")
-        # Convert RGB to BGR for OpenCV compatibility
-        rgb_array = np.array(img)
-        bgr_array = rgb_array[:, :, ::-1]
-        return bgr_array
-    except Exception:
-        return None
 
 
 def run_worker(config: Config) -> None:

@@ -105,6 +105,67 @@ def _segments_for_window(records: List[Dict[str, Any]], start_frame: int, end_fr
     return selected
 
 
+def _sample_frame_ids(start_frame: int, end_frame: int, num_frames: int) -> List[int]:
+    if end_frame <= start_frame:
+        return [int(start_frame)] * max(1, num_frames)
+    if num_frames <= 1:
+        return [int((start_frame + end_frame) // 2)]
+    span = end_frame - start_frame
+    return [int(round(start_frame + span * i / (num_frames - 1))) for i in range(num_frames)]
+
+
+def _get_memory_payload(vlm_json: Dict[str, Any]) -> Dict[str, Any]:
+    if isinstance(vlm_json.get("memory"), dict):
+        return vlm_json["memory"]
+    return vlm_json
+
+
+def _memory_record_from_subtask_result(
+    subtask_record: Dict[str, Any],
+    vlm_json: Dict[str, Any],
+    episode_index: int,
+    task: str,
+    fps: float,
+) -> Dict[str, Any]:
+    payload = _get_memory_payload(vlm_json)
+    summaries = payload.get("summaries") or []
+    summary = ""
+    if summaries:
+        summary = str(summaries[0]).strip()
+    elif payload.get("summary"):
+        summary = str(payload.get("summary")).strip()
+
+    event_types = payload.get("change_event_types") or [["memory_updated"]]
+    if event_types and isinstance(event_types[0], list):
+        events = event_types[0]
+    elif isinstance(event_types, list):
+        events = event_types
+    else:
+        events = [str(event_types)]
+    events = [str(x).strip() for x in events if str(x).strip()] or ["memory_updated"]
+
+    start_frame = int(subtask_record.get("start_frame", 0))
+    end_frame = int(subtask_record.get("end_frame", start_frame))
+    segment_index = int(subtask_record.get("segment_index", 0))
+
+    return {
+        "episode_index": episode_index,
+        "segment_index": segment_index,
+        "start_frame": start_frame,
+        "end_frame": end_frame,
+        "start_timestamp": float(start_frame / fps),
+        "end_timestamp": float(end_frame / fps),
+        "task": task,
+        "summary": summary,
+        "change_event_type": events,
+        "evidence_start_frame": start_frame,
+        "evidence_end_frame": end_frame,
+        "annotation_status": "vlm_pseudo",
+        "aligned_to_subtask": True,
+        "subtask": str(subtask_record.get("subtask", "")),
+    }
+
+
 def _memory_records_from_subtasks(
     subtask_records: List[Dict[str, Any]],
     memory_records: List[Dict[str, Any]],
@@ -507,17 +568,38 @@ def create_app(config: Config) -> FastAPI:
                     continue
                 
                 w_path = windows_jsonl_path(ctx.samples_dir, sid)
+                use_subtask_memory_jobs = (
+                    "memory" in config.annotation.targets
+                    and "subtask" not in config.annotation.targets
+                    and config.memory.align_to_subtasks
+                    and bool(ctx.sample_subtasks.get(sid))
+                )
                 
                 # Step A: Generate window tasks
                 if sample_status[sid] == 0:
                     try:
                         fps, nframes = read_video_info(mp4)
-                        windows = build_windows(
-                            fps, nframes,
-                            config.windowing.window_sec,
-                            config.windowing.step_sec,
-                            config.windowing.frames_per_window
-                        )
+                        if use_subtask_memory_jobs:
+                            windows = [
+                                Window(
+                                    int(seg.get("segment_index", idx)),
+                                    int(seg.get("start_frame", 0)),
+                                    int(seg.get("end_frame", 0)),
+                                    _sample_frame_ids(
+                                        int(seg.get("start_frame", 0)),
+                                        int(seg.get("end_frame", 0)),
+                                        config.windowing.frames_per_window,
+                                    ),
+                                )
+                                for idx, seg in enumerate(ctx.sample_subtasks[sid])
+                            ]
+                        else:
+                            windows = build_windows(
+                                fps, nframes,
+                                config.windowing.window_sec,
+                                config.windowing.step_sec,
+                                config.windowing.frames_per_window
+                            )
                         
                         # Load completed windows
                         done_wids = set()
@@ -536,7 +618,13 @@ def create_app(config: Config) -> FastAPI:
                                 if w.window_id in done_wids:
                                     continue
                                 
-                                tid = f"{ctx.subset}::{sid}_w{w.window_id}"
+                                tid = f"{ctx.subset}::{sid}_{'m' if use_subtask_memory_jobs else 'w'}{w.window_id}"
+                                current_subtask = []
+                                if use_subtask_memory_jobs:
+                                    current_subtask = [
+                                        seg for seg in ctx.sample_subtasks[sid]
+                                        if int(seg.get("segment_index", -1)) == int(w.window_id)
+                                    ]
                                 
                                 # Check if already active
                                 active = False
@@ -567,6 +655,8 @@ def create_app(config: Config) -> FastAPI:
                                             w.start_frame,
                                             w.end_frame,
                                         ) if config.memory.use_subtask_context else [],
+                                        "memory_subtask_aligned": use_subtask_memory_jobs,
+                                        "target_subtask": current_subtask[0] if current_subtask else {},
                                         **ctx.sample_meta.get(sid, {}),
                                     }
                                 }
