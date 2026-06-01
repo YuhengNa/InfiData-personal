@@ -35,3 +35,5 @@ checkpoints/
 !examples/aloha_mini/meta/*.jsonl
 !examples/aloha_mini/report_samples/*.jpg
 !examples/aloha_mini/report_samples/*.png
+
+examples/

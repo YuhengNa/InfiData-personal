@@ -2,22 +2,22 @@ datasets:
   - root: "/mnt/data/szeluresearch/InfiData/examples"
     subset: "aloha_full"
     format: "infidata"
-    video_key: "cam_high"
+    video_key: "auto"
 
 run:
-  base_dir: "/mnt/data/szeluresearch/InfiData/video2tasks/runs"
-  run_id: "qwen3vl_aloha_cam_high_fine"
+  base_dir: "/mnt/data/szeluresearch/InfiData/video2tasks/aloha_full/video2tasks_runs"
+  run_id: "qwen3vl_battery_try_memory_retry_20260602"
 
 server:
   host: "127.0.0.1"
-  port: 8120
+  port: 8100
   max_queue: 8
   inflight_timeout_sec: 600.0
   max_retries_per_job: 5
   auto_exit_after_all_done: false
 
 worker:
-  server_url: "http://127.0.0.1:8120"
+  server_url: "http://127.0.0.1:8100"
   backend: "qwen3vl"
 
   qwen3vl:
@@ -38,8 +38,26 @@ windowing:
   target_height: 480
   png_compression: 0
 
+annotation:
+  targets:
+    - "memory"
+    - "subtask"
+
 segmentation:
   mode: "fine"
+
+infidata:
+  write_back: true
+  update_parquet_subtasks: false
+
+memory:
+  use_subtask_context: true
+  align_to_subtasks: false
+
+visualization:
+  enabled: true
+  output_dir: ""
+  panel_height: 180
 
 progress:
   total_override: 0
