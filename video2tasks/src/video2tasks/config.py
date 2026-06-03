@@ -147,6 +147,14 @@ class InfiDataConfig(BaseModel):
         default=False,
         description="Update each episode parquet subtask column from generated subtask segments",
     )
+    update_parquet_memory_summaries: bool = Field(
+        default=False,
+        description="Update each episode parquet memory summary column from generated memory segments",
+    )
+    parquet_memory_column: str = Field(
+        default="summary",
+        description="Column name to store per-row memory summaries in episode parquet files",
+    )
 
 
 class MemoryConfig(BaseModel):

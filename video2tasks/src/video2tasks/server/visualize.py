@@ -89,8 +89,12 @@ def render_annotation_video(
         if not ok:
             break
 
+        # Work in RGB for visualization colors, then convert back for OpenCV's
+        # BGR VideoWriter. This keeps the exported mp4 from showing swapped
+        # red/blue channels in common video players.
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         canvas = np.zeros((height + panel_height, width, 3), dtype=np.uint8)
-        canvas[:height, :, :] = frame
+        canvas[:height, :, :] = frame_rgb
         panel = canvas[height:, :, :]
         panel[:, :, :] = (18, 18, 18)
 
@@ -113,7 +117,7 @@ def render_annotation_video(
         cv2.putText(canvas, f"Current subtask: {_shorten(active_subtask, 120)}", (12, height + 128), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240), 1, cv2.LINE_AA)
         cv2.putText(canvas, f"Current memory: {_shorten(active_memory, 120)}", (12, height + 154), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240), 1, cv2.LINE_AA)
 
-        writer.write(canvas)
+        writer.write(cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
         frame_idx += 1
 
     cap.release()

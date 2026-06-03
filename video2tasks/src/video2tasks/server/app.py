@@ -213,15 +213,32 @@ def _memory_records_from_subtasks(
     return aligned
 
 
-def _update_episode_parquet_subtasks(data_dir: Path, source_meta: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
+def _resolve_episode_parquet_path(data_dir: Path, source_meta: Dict[str, Any]) -> Optional[Path]:
     parquet_rel = source_meta.get("parquet_path")
-    if not parquet_rel:
-        print(f"[Warn] No parquet_path found for episode {source_meta.get('episode_index')}; skip parquet update")
-        return
+    if parquet_rel:
+        parquet_path = data_dir / str(parquet_rel)
+        if parquet_path.exists():
+            return parquet_path
+        print(f"[Warn] Parquet not found from metadata: {parquet_path}")
 
-    parquet_path = data_dir / str(parquet_rel)
-    if not parquet_path.exists():
-        print(f"[Warn] Parquet not found: {parquet_path}")
+    try:
+        episode_index = int(source_meta.get("episode_index", -1))
+    except (TypeError, ValueError):
+        episode_index = -1
+    if episode_index < 0:
+        return None
+
+    pattern = f"episode_{episode_index:06d}.parquet"
+    candidates = sorted((data_dir / "data").rglob(pattern)) if (data_dir / "data").exists() else []
+    if candidates:
+        return candidates[0]
+    return None
+
+
+def _update_episode_parquet_subtasks(data_dir: Path, source_meta: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
+    parquet_path = _resolve_episode_parquet_path(data_dir, source_meta)
+    if parquet_path is None:
+        print(f"[Warn] No parquet found for episode {source_meta.get('episode_index')}; skip parquet subtask update")
         return
 
     import pandas as pd
@@ -234,6 +251,48 @@ def _update_episode_parquet_subtasks(data_dir: Path, source_meta: Dict[str, Any]
     for rec in records:
         mask = (df["frame_index"] >= int(rec["start_frame"])) & (df["frame_index"] <= int(rec["end_frame"]))
         df.loc[mask, "subtask"] = str(rec.get("subtask", ""))
+
+    df.to_parquet(parquet_path, index=False)
+
+
+def _insert_or_get_column(df, column: str, after_column: str) -> None:
+    if column in df.columns:
+        return
+    loc = df.columns.get_loc(after_column) + 1 if after_column in df.columns else len(df.columns)
+    df.insert(loc, column, "")
+
+
+def _update_episode_parquet_memory_summaries(
+    data_dir: Path,
+    source_meta: Dict[str, Any],
+    records: List[Dict[str, Any]],
+    column: str = "summary",
+) -> None:
+    parquet_path = _resolve_episode_parquet_path(data_dir, source_meta)
+    if parquet_path is None:
+        print(f"[Warn] No parquet found for episode {source_meta.get('episode_index')}; skip parquet memory update")
+        return
+
+    import pandas as pd
+
+    df = pd.read_parquet(parquet_path)
+    _insert_or_get_column(df, column, "subtask")
+
+    if "frame_index" in df.columns:
+        for rec in records:
+            start_frame = int(rec.get("start_frame", 0))
+            end_frame = int(rec.get("end_frame", start_frame))
+            mask = (df["frame_index"] >= start_frame) & (df["frame_index"] <= end_frame)
+            df.loc[mask, column] = str(rec.get("summary", ""))
+    elif "timestamp" in df.columns:
+        for rec in records:
+            start_ts = float(rec.get("start_timestamp", 0.0))
+            end_ts = float(rec.get("end_timestamp", start_ts))
+            mask = (df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)
+            df.loc[mask, column] = str(rec.get("summary", ""))
+    else:
+        print(f"[Warn] frame_index/timestamp column missing in {parquet_path}; skip parquet memory update")
+        return
 
     df.to_parquet(parquet_path, index=False)
 
@@ -800,6 +859,18 @@ def create_app(config: Config) -> FastAPI:
                                         episode_index,
                                     )
                                     print(f"[WriteBack] Updated {ctx.subset}/meta/memory_segments.jsonl for episode {episode_index}")
+
+                                    if config.infidata.update_parquet_memory_summaries:
+                                        _update_episode_parquet_memory_summaries(
+                                            Path(ctx.data_dir),
+                                            source_meta,
+                                            memory_records,
+                                            config.infidata.parquet_memory_column,
+                                        )
+                                        print(
+                                            f"[WriteBack] Updated parquet {config.infidata.parquet_memory_column} "
+                                            f"column for episode {episode_index}"
+                                        )
 
                             if config.visualization.enabled and memory_records_for_viz:
                                 viz_dir = Path(config.visualization.output_dir) if config.visualization.output_dir else Path(ctx.run_dir) / "visualizations"

@@ -78,6 +78,8 @@ annotation:
 infidata:
   write_back: false
   update_parquet_subtasks: false
+  update_parquet_memory_summaries: false
+  parquet_memory_column: "summary"
 
 # Memory annotation options
 memory:

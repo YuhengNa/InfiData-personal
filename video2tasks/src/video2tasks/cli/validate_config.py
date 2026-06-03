@@ -28,6 +28,8 @@ def main(config: Path) -> None:
         click.echo(f"  Segmentation mode: {cfg.segmentation.mode}")
         click.echo(f"  InfiData write back: {cfg.infidata.write_back}")
         click.echo(f"  Update parquet subtasks: {cfg.infidata.update_parquet_subtasks}")
+        click.echo(f"  Update parquet memory summaries: {cfg.infidata.update_parquet_memory_summaries}")
+        click.echo(f"  Parquet memory column: {cfg.infidata.parquet_memory_column}")
         click.echo(f"  Memory uses subtask context: {cfg.memory.use_subtask_context}")
         click.echo(f"  Memory aligns to subtasks: {cfg.memory.align_to_subtasks}")
         click.echo(f"  Visualization enabled: {cfg.visualization.enabled}")
