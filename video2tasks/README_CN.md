@@ -14,6 +14,8 @@
 
 ---
 
+> InfiData、RMBench、memory summary、parquet 写回和可视化的项目对接说明，请参阅 [自动标注管线使用说明](PIPELINE_GUIDE_CN.md)。
+
 ## 📖 概览
 
 ### 🎯 解决什么问题？

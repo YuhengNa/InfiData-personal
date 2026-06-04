@@ -19,6 +19,14 @@ InfiData 的长期目标：
 
 ---
 
+## 系统架构
+
+InfiData 覆盖从真实世界数据采集、数据处理与治理，到 VLA 训练、评测和主动数据改进的完整闭环。
+
+![InfiData Pipeline for Vision-Language-Action Robot Learning](docs/assets/infidata-vla-pipeline.png)
+
+---
+
 ## 什么是 Multi-Context
 
 传统机器人数据通常只包含图像、状态和动作。InfiData 在此基础上标准化了更丰富的训练上下文：
