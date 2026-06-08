@@ -8,6 +8,22 @@
 | `droid_mini` | InfiData | DROID | 3 episodes | DROID 最小转换样例，包含 real_future 子目标帧指针 |
 | `rmbench_mini` | InfiData | RMBench `battery_try/demo_clean` | 3 episodes | RMBench 最小转换样例，subtask 来自 `language_annotation.json` |
 | `rmbench_lerobot_mini` | LeRobot/openpi | `rmbench_mini` | 3 episodes | 面向 openpi 的 LeRobot 样例，额外包含 `subtask` 和 `memory` |
+| `interdata_a1_sim_updated_mini` | InfiData | InterData-A1 `sim_updated` | 3 episodes | Franka 仿真数据转换样例，保留相机标定和 EE/TCP 扩展字段 |
+
+## InterData-A1 sim_updated
+
+```bash
+python scripts/convert/convert_interdata_a1_sim_updated_mini.py \
+  --interdata_root /path/to/InterData-A1/lerobot_standard/sim_updated \
+  --task articulation_tasks/franka/close_the_electriccooker \
+  --out_root examples/interdata_a1_sim_updated_mini \
+  --num_episodes 3 \
+  --overwrite
+
+python scripts/validate/validate_robot_dataset.py \
+  examples/interdata_a1_sim_updated_mini \
+  --report examples/interdata_a1_sim_updated_mini/validation_report.json
+```
 
 ## RMBench 转换链路
 

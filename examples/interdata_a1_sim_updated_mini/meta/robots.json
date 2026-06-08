@@ -1,0 +1,21 @@
+{
+  "franka": {
+    "robot_type": "franka",
+    "source_robot_type": "piper",
+    "domain": "sim",
+    "state_dim": 8,
+    "action_dim": 8,
+    "control_mode": "joint",
+    "fps": 30,
+    "cameras": [
+      "cam_high",
+      "cam_right_wrist"
+    ],
+    "camera_mapping": {
+      "cam_high": "images.rgb.head",
+      "cam_right_wrist": "images.rgb.hand"
+    },
+    "state_description": "7 joint positions + 1 gripper position",
+    "action_description": "7 joint targets + 1 gripper target"
+  }
+}

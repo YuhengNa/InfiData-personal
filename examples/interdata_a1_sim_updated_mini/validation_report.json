@@ -1,0 +1,30 @@
+{
+  "valid": true,
+  "dataset_root": "/mnt/workspace/wudi/InfiData-personal/examples/interdata_a1_sim_updated_mini",
+  "num_episodes": 3,
+  "num_segments": 3,
+  "episodes": [
+    {
+      "path": "data/interdata_a1/chunk-000/episode_000000.parquet",
+      "rows": 112,
+      "columns": 54,
+      "state_dim": 8,
+      "action_dim": 8
+    },
+    {
+      "path": "data/interdata_a1/chunk-000/episode_000001.parquet",
+      "rows": 199,
+      "columns": 54,
+      "state_dim": 8,
+      "action_dim": 8
+    },
+    {
+      "path": "data/interdata_a1/chunk-000/episode_000002.parquet",
+      "rows": 211,
+      "columns": 54,
+      "state_dim": 8,
+      "action_dim": 8
+    }
+  ],
+  "errors": []
+}

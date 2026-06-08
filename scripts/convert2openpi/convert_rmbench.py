@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 CAMERA_KEYS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 IMAGE_FEATURE_PREFIX = "observation.images"
+MEMORY_SEGMENTS_FILENAME = "memory_segments.jsonl"
 
 
 class VideoFrameReader:
@@ -87,6 +88,84 @@ def require_text(value, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
     return value.strip()
+
+
+def load_memory_segments(infidata_root: Path) -> dict[int, list[dict]]:
+    path = infidata_root / "meta" / MEMORY_SEGMENTS_FILENAME
+    records = read_jsonl(path)
+    if not records:
+        raise ValueError(f"{path} exists but does not contain memory annotations")
+
+    by_episode: dict[int, list[dict]] = {}
+    for item in records:
+        episode_index = int(item["episode_index"])
+        segment_index = int(item.get("segment_index", len(by_episode.get(episode_index, []))))
+        start_frame = int(item["start_frame"])
+        end_frame = int(item["end_frame"])
+        if start_frame < 0:
+            raise ValueError(f"Negative memory start_frame in episode {episode_index}, segment {segment_index}")
+        if end_frame < start_frame:
+            raise ValueError(f"Invalid memory frame range in episode {episode_index}, segment {segment_index}")
+
+        by_episode.setdefault(episode_index, []).append(
+            {
+                "segment_index": segment_index,
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "summary": require_text(item.get("summary"), f"memory summary for episode {episode_index}"),
+            }
+        )
+
+    for episode_index, segments in by_episode.items():
+        segments.sort(key=lambda item: (item["start_frame"], item["end_frame"], item["segment_index"]))
+        previous_end = -1
+        for segment in segments:
+            if segment["start_frame"] <= previous_end:
+                raise ValueError(f"Overlapping memory segments in episode {episode_index}")
+            previous_end = segment["end_frame"]
+
+    return by_episode
+
+
+def prepare_episode_memory_segments(
+    memory_segments: dict[int, list[dict]],
+    episode_index: int,
+    num_frames: int,
+    max_tail_extension_frames: int,
+) -> list[dict]:
+    segments = memory_segments.get(episode_index)
+    if not segments:
+        raise ValueError(f"No memory segments found for episode {episode_index}")
+
+    covered = [False] * num_frames
+    for segment in segments:
+        for frame_index in range(max(0, segment["start_frame"]), min(num_frames - 1, segment["end_frame"]) + 1):
+            covered[frame_index] = True
+
+    missing = [frame_index for frame_index, is_covered in enumerate(covered) if not is_covered]
+    if not missing:
+        return segments
+
+    tail_start = num_frames - len(missing)
+    is_tail_gap = missing == list(range(tail_start, num_frames))
+    if is_tail_gap and len(missing) <= max_tail_extension_frames:
+        extended = [dict(segment) for segment in segments]
+        extended[-1]["end_frame"] = num_frames - 1
+        print(
+            f"[INFO] Extending memory for episode {episode_index} over final "
+            f"{len(missing)} frame(s): {missing[0]}-{missing[-1]}"
+        )
+        return extended
+
+    raise ValueError(f"No memory segment covers episode {episode_index}, frame {missing[0]}")
+
+
+def memory_for_frame(segments: list[dict], episode_index: int, frame_index: int) -> str:
+    for segment in segments:
+        if segment["start_frame"] <= frame_index <= segment["end_frame"]:
+            return segment["summary"]
+
+    raise ValueError(f"No memory segment covers episode {episode_index}, frame {frame_index}")
 
 
 def infer_image_shape(first_episode: Path, infidata_root: Path) -> tuple[int, int]:
@@ -192,6 +271,8 @@ def convert_episode(
     reader: VideoFrameReader,
     state_dim: int,
     action_dim: int,
+    memory_segments: dict[int, list[dict]] | None = None,
+    max_memory_tail_extension_frames: int = 2,
 ):
     df = pd.read_parquet(episode_path)
     if df.empty:
@@ -204,10 +285,29 @@ def convert_episode(
     if not np.array_equal(actual, expected):
         raise ValueError(f"Non-contiguous frame_index in {episode_path}")
 
+    episode_indices = df["episode_index"].to_numpy(dtype=np.int64) if "episode_index" in df.columns else None
+    episode_index = int(episode_indices[0]) if episode_indices is not None else None
+    if episode_indices is not None and not np.all(episode_indices == episode_index):
+        raise ValueError(f"Multiple episode_index values in {episode_path}")
+    if memory_segments is not None and episode_index is None:
+        raise KeyError(f"Missing episode_index column in {episode_path}; required for {MEMORY_SEGMENTS_FILENAME}")
+    episode_memory_segments = None
+    if memory_segments is not None:
+        episode_memory_segments = prepare_episode_memory_segments(
+            memory_segments=memory_segments,
+            episode_index=int(episode_index),
+            num_frames=len(df),
+            max_tail_extension_frames=max_memory_tail_extension_frames,
+        )
+
     for _, row in df.iterrows():
+        frame_index = int(row["frame_index"])
         task = require_text(row["task"], "task")
         subtask = require_text(row["subtask"], "subtask")
-        memory = require_text(row["memory"], "memory") if "memory" in df.columns else subtask
+        if episode_memory_segments is not None:
+            memory = memory_for_frame(episode_memory_segments, int(episode_index), frame_index)
+        else:
+            memory = require_text(row["memory"], "memory") if "memory" in df.columns else subtask
 
         state = as_float32_vector(row["observation.state"], "observation.state")
         action = as_float32_vector(row["action"], "action")
@@ -263,7 +363,9 @@ This dataset was converted from an InfiData RMBench dataset for LeRobot/openpi t
 - `subtask`
 - `memory`
 
-`memory` is initialized from `subtask` so the openpi data path can be exercised before a separate long-horizon memory annotation pass.
+When `meta/memory_segments.jsonl` is present, `memory` is read from its `summary` field for the covered frame range.
+Episodes with missing memory coverage are skipped by default, or fail immediately when converted with `--strict`.
+By default, a final missing tail of at most 2 frames is filled by extending the last real memory segment.
 """
     (output_root / "README.md").write_text(text, encoding="utf-8")
 
@@ -279,11 +381,19 @@ def main():
     parser.add_argument("--use_images", action="store_true", help="store image files instead of encoding LeRobot videos")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--strict", action="store_true", help="fail on the first invalid episode instead of skipping")
+    parser.add_argument(
+        "--max_memory_tail_extension_frames",
+        type=int,
+        default=3,
+        help="extend the final real memory segment over at most this many missing tail frames; use 0 to disable",
+    )
     args = parser.parse_args()
 
     infidata_root = Path(args.infidata_root).resolve()
     if not infidata_root.exists():
         raise FileNotFoundError(f"InfiData root not found: {infidata_root}")
+    if args.max_memory_tail_extension_frames < 0:
+        raise ValueError("--max_memory_tail_extension_frames must be non-negative")
 
     episode_paths = find_episode_parquets(infidata_root)
     if not episode_paths:
@@ -291,6 +401,13 @@ def main():
     for path in episode_paths:
         if not path.exists():
             raise FileNotFoundError(f"Episode parquet listed in metadata does not exist: {path}")
+
+    memory_segments_path = infidata_root / "meta" / MEMORY_SEGMENTS_FILENAME
+    memory_segments = None
+    if memory_segments_path.exists():
+        memory_segments = load_memory_segments(infidata_root)
+        print(f"[INFO] Loaded memory annotations from {memory_segments_path}")
+        print(f"[INFO] Episodes with memory annotations: {len(memory_segments)}")
 
     if args.num_episodes is not None:
         if args.num_episodes <= 0:
@@ -330,6 +447,8 @@ def main():
                     reader=reader,
                     state_dim=state_dim,
                     action_dim=action_dim,
+                    memory_segments=memory_segments,
+                    max_memory_tail_extension_frames=args.max_memory_tail_extension_frames,
                 )
             except Exception as exc:
                 dataset.clear_episode_buffer()

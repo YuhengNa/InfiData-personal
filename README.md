@@ -58,6 +58,7 @@ InfiData/
 │   ├── convert/
 │   │   ├── convert_aloha_cosmos_mini.py
 │   │   ├── convert_droid_mini.py
+│   │   ├── convert_interdata_a1_sim_updated_mini.py
 │   │   └── convert_rmbench_mini.py
 │   ├── convert2openpi/
 │   │   └── convert_rmbench.py
@@ -67,6 +68,7 @@ InfiData/
 ├── examples/
 │   ├── aloha_mini/
 │   ├── droid_mini/
+│   ├── interdata_a1_sim_updated_mini/
 │   ├── rmbench_mini/
 │   └── rmbench_lerobot_mini/
 ├── video2tasks/
@@ -76,9 +78,10 @@ InfiData/
 目前仓库已经包含：
 
 1. 三个 InfiData 转换示例：ALOHA mini、DROID mini、RMBench mini。
-2. 统一 schema 与配置组织方式。
-3. 一个 InfiData 到 LeRobot/openpi 的转换示例。
-4. 一个可用于自动分段与指令生成的 video2tasks 模块。
+2. 一个 InterData-A1 `sim_updated` 到 InfiData 的转换示例。
+3. 统一 schema 与配置组织方式。
+4. 一个 InfiData 到 LeRobot/openpi 的转换示例。
+5. 一个可用于自动分段与指令生成的 video2tasks 模块。
 
 ---
 
@@ -155,6 +158,13 @@ examples/droid_mini：
 3. 包含标准相机映射和 real_future 子目标帧指针。
 4. 当前 subtask 为自动占位分段，便于先打通流程。
 
+examples/interdata_a1_sim_updated_mini：
+
+1. InterData-A1 `sim_updated`（LeRobot v2.1）的最小转换示例。
+2. 包含 3 个 Franka 仿真 episode parquet，以及 head/hand 两路视频链接。
+3. 保留相机标定、EE/TCP pose 和 `master_actions.*` 源字段。
+4. `subtask`、质量和成功状态为 `auto_placeholder`，需要后续标注或审核。
+
 examples/rmbench_mini：
 
 1. RMBench `battery_try/demo_clean` 的最小 InfiData 转换示例。
@@ -194,7 +204,7 @@ video2tasks 可用于长视频自动分段与指令草稿生成，典型流程�
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install numpy pandas pyarrow tqdm h5py
+pip install numpy pandas pyarrow tqdm h5py jsonschema
 ```
 
 ### 2) 生成 ALOHA mini 示例
@@ -238,7 +248,22 @@ python scripts/convert/convert_rmbench_mini.py \
   --num_episodes 3
 ```
 
-### 5) 生成 LeRobot/openpi 示例
+### 5) 生成并验证 InterData-A1 sim_updated mini 示例
+
+```bash
+python scripts/convert/convert_interdata_a1_sim_updated_mini.py \
+  --interdata_root /path/to/InterData-A1/lerobot_standard/sim_updated \
+  --task articulation_tasks/franka/close_the_electriccooker \
+  --out_root examples/interdata_a1_sim_updated_mini \
+  --num_episodes 3 \
+  --overwrite
+
+python scripts/validate/validate_robot_dataset.py \
+  examples/interdata_a1_sim_updated_mini \
+  --report examples/interdata_a1_sim_updated_mini/validation_report.json
+```
+
+### 6) 生成 LeRobot/openpi 示例
 
 先准备好 LeRobot 依赖环境，例如使用 openpi 仓库的 Python 环境。建议把 LeRobot 缓存目录放到大盘：
 

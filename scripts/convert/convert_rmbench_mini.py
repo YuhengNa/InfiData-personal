@@ -27,7 +27,14 @@ def episode_index_from_path(path: Path) -> int:
     return int(stem[len("episode"):])
 
 
-def decode_image(buf):
+def decode_image_to_bgr(buf):
+    if isinstance(buf, np.ndarray) and buf.ndim == 3 and buf.dtype == np.uint8:
+        if buf.shape[2] == 3:
+            return cv2.cvtColor(buf, cv2.COLOR_RGB2BGR)
+        if buf.shape[2] == 4:
+            return cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
+        raise ValueError(f"Unsupported RMBench raw image shape: {buf.shape}")
+
     if isinstance(buf, np.ndarray) and buf.dtype == np.uint8:
         arr = buf
     else:
@@ -36,7 +43,9 @@ def decode_image(buf):
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("Failed to decode RMBench image bytes")
-    return img
+    # RMBench stores RGB camera arrays but encodes them through OpenCV. Treat the
+    # decoded bytes as RGB channel order and convert to BGR before VideoWriter.
+    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 
 def export_camera_video(rgb_dataset, dst_path: Path, fps: int) -> str:
@@ -44,7 +53,7 @@ def export_camera_video(rgb_dataset, dst_path: Path, fps: int) -> str:
     if dst_path.exists():
         return str(dst_path)
 
-    first = decode_image(rgb_dataset[0])
+    first = decode_image_to_bgr(rgb_dataset[0])
     height, width = first.shape[:2]
     writer = cv2.VideoWriter(
         str(dst_path),
@@ -57,7 +66,7 @@ def export_camera_video(rgb_dataset, dst_path: Path, fps: int) -> str:
 
     writer.write(first)
     for i in range(1, len(rgb_dataset)):
-        img = decode_image(rgb_dataset[i])
+        img = decode_image_to_bgr(rgb_dataset[i])
         if img.shape[:2] != (height, width):
             img = cv2.resize(img, (width, height))
         writer.write(img)

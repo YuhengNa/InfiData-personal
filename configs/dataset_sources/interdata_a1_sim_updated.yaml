@@ -1,0 +1,18 @@
+name: InterData-A1
+release: sim_updated
+category: robot_demos
+raw_format:
+  - lerobot_v2.1
+  - parquet
+  - mp4
+has_robot_action: true
+has_video: true
+default_fps: 30
+default_robot_type: franka
+source_robot_type_note: Some v2.1 metadata says piper; the local task hierarchy and v3.0 metadata say Franka.
+default_control_mode: joint
+domain: sim
+camera_mapping:
+  cam_high: images.rgb.head
+  cam_right_wrist: images.rgb.hand
+notes: The single hand camera uses cam_right_wrist only as an InfiData schema compatibility alias.
