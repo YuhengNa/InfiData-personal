@@ -2,10 +2,19 @@
 # Copy this file to config.yaml and customize for your setup
 
 # Dataset configuration
-# Format: list of {root: path, subset: name} pairs
+# Format: list of {root, subset, format, video_key} entries
 datasets:
-  - root: "./data"  # Path to your video data directory
-    subset: "demo"   # Subdirectory name containing video samples
+  # Folder mode expects: ./data/demo/<sample_id>/Frame_*.mp4
+  - root: "./data"
+    subset: "demo"
+    format: "folder"
+
+  # InfiData mode expects: <root>/<subset>/meta/episodes.jsonl
+  # It reads video_paths.<video_key> from each episode.
+  # - root: "../examples"
+  #   subset: "aloha_mini"
+  #   format: "infidata"
+  #   video_key: "cam_high"
 
 # Run configuration
 run:
@@ -46,6 +55,42 @@ windowing:
   target_width: 720      # Target frame width
   target_height: 480     # Target frame height
   png_compression: 0     # PNG compression level (0-9)
+
+# Segmentation mode
+# coarse: split only when the manipulated object changes
+# fine: split by action/manipulation phases for InfiData subtasks
+segmentation:
+  mode: "coarse"  # Options: "coarse", "fine"
+
+# Annotation targets
+# subtask: produce InfiData subtask segments
+# memory: produce long-term memory_segments for MEM training
+annotation:
+  targets:
+    - "subtask"
+    # - "memory"
+
+# InfiData write-back
+# When enabled for format: infidata datasets, results are merged back into:
+#   <dataset>/meta/segments.jsonl
+#   <dataset>/meta/memory_segments.jsonl
+infidata:
+  write_back: false
+  update_parquet_subtasks: false
+  update_parquet_memory_summaries: false
+  parquet_memory_column: "summary"
+
+# Memory annotation options
+memory:
+  use_subtask_context: true
+  align_to_subtasks: true
+
+# Visualization options
+# Renders annotated videos with subtask and memory timelines.
+visualization:
+  enabled: false
+  output_dir: ""
+  panel_height: 180
 
 # Progress configuration
 progress:

@@ -1,0 +1,67 @@
+datasets:
+  - root: "/mnt/workspace/InfiData/Rmbench_infi"
+    subset: "observe_and_pickup"
+    format: "infidata"
+    video_key: "cam_high"
+
+run:
+  base_dir: "/mnt/workspace/wudi/InfiData-personal/video2tasks/runs"
+  run_id: "observe_and_pickup_memory_v1"
+
+server:
+  host: "127.0.0.1"
+  port: 8133
+  max_queue: 8
+  inflight_timeout_sec: 600.0
+  max_retries_per_job: 5
+  auto_exit_after_all_done: false
+
+worker:
+  server_url: "http://127.0.0.1:8133"
+  backend: "qwen3vl"
+
+  qwen3vl:
+    model_path: "Qwen/Qwen3-VL-8B-Instruct"
+    device_map: "auto"
+
+  remote_api:
+    api_url: "http://127.0.0.1:8080/infer"
+    api_key: ""
+    timeout_sec: 60.0
+    headers: {}
+
+windowing:
+  window_sec: 16.0
+  step_sec: 8.0
+  frames_per_window: 16
+  target_width: 720
+  target_height: 480
+  png_compression: 0
+
+annotation:
+  targets:
+    - "memory"
+
+segmentation:
+  mode: "fine"
+
+infidata:
+  write_back: true
+  update_parquet_subtasks: false
+  update_parquet_memory_summaries: true
+  parquet_memory_column: "summary"
+
+memory:
+  use_subtask_context: true
+  align_to_subtasks: false
+
+visualization:
+  enabled: true
+  output_dir: ""
+  panel_height: 180
+
+progress:
+  total_override: 0
+
+logging:
+  level: "INFO"

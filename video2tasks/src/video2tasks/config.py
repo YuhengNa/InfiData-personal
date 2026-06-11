@@ -13,6 +13,16 @@ class DatasetConfig(BaseModel):
     """Dataset configuration."""
     root: str = Field(..., description="Path to data root directory")
     subset: str = Field(..., description="Subset/directory name")
+    format: str = Field(default="folder", description="Input format: folder or infidata")
+    video_key: str = Field(default="cam_high", description="InfiData camera key to use")
+
+    @field_validator("format")
+    @classmethod
+    def validate_format(cls, v: str) -> str:
+        allowed = ["folder", "infidata"]
+        if v not in allowed:
+            raise ValueError(f"format must be one of {allowed}, got {v}")
+        return v
 
 
 class RunConfig(BaseModel):
@@ -74,6 +84,101 @@ class WindowingConfig(BaseModel):
     png_compression: int = Field(default=0, description="PNG compression level (0-9)")
 
 
+class SegmentationConfig(BaseModel):
+    """Subtask segmentation behavior."""
+    mode: str = Field(
+        default="coarse",
+        description="Segmentation mode: coarse/object_switch or fine/action_phase",
+    )
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        aliases = {
+            "coarse": "coarse",
+            "object_switch": "coarse",
+            "fine": "fine",
+            "action_phase": "fine",
+        }
+        key = v.lower()
+        if key not in aliases:
+            allowed = sorted(aliases)
+            raise ValueError(f"mode must be one of {allowed}, got {v}")
+        return aliases[key]
+
+
+class AnnotationConfig(BaseModel):
+    """Annotation heads to run for each video window."""
+    targets: List[str] = Field(
+        default_factory=lambda: ["subtask"],
+        description="Annotation targets: subtask, memory, or both",
+    )
+
+    @field_validator("targets", mode="before")
+    @classmethod
+    def normalize_targets(cls, v):
+        if isinstance(v, str):
+            return [v]
+        return v
+
+    @field_validator("targets")
+    @classmethod
+    def validate_targets(cls, v: List[str]) -> List[str]:
+        allowed = {"subtask", "memory"}
+        targets = []
+        for item in v:
+            key = str(item).lower()
+            if key not in allowed:
+                raise ValueError(f"annotation target must be one of {sorted(allowed)}, got {item}")
+            if key not in targets:
+                targets.append(key)
+        if not targets:
+            raise ValueError("annotation.targets must not be empty")
+        return targets
+
+
+class InfiDataConfig(BaseModel):
+    """Controls writing annotation results back into an InfiData dataset."""
+    write_back: bool = Field(
+        default=False,
+        description="Write generated annotations into <dataset>/meta JSONL files",
+    )
+    update_parquet_subtasks: bool = Field(
+        default=False,
+        description="Update each episode parquet subtask column from generated subtask segments",
+    )
+    update_parquet_memory_summaries: bool = Field(
+        default=False,
+        description="Update each episode parquet memory summary column from generated memory segments",
+    )
+    parquet_memory_column: str = Field(
+        default="summary",
+        description="Column name to store per-row memory summaries in episode parquet files",
+    )
+
+
+class MemoryConfig(BaseModel):
+    """Memory annotation behavior."""
+    use_subtask_context: bool = Field(
+        default=True,
+        description="Include existing subtask segments in memory prompts when available",
+    )
+    align_to_subtasks: bool = Field(
+        default=True,
+        description="Use existing subtask boundaries as memory segment boundaries when available",
+    )
+
+
+class VisualizationConfig(BaseModel):
+    """Render annotated videos for quality inspection."""
+    enabled: bool = Field(default=False, description="Render a visualization video after each episode")
+    output_dir: str = Field(
+        default="",
+        description="Optional output directory. Defaults to <run_dir>/visualizations",
+    )
+    panel_height: int = Field(default=180, description="Bottom annotation panel height in pixels")
+
+
 class ProgressConfig(BaseModel):
     """Progress tracking configuration."""
     total_override: int = Field(default=0, description="Override total count (0=auto)")
@@ -100,6 +205,11 @@ class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
     windowing: WindowingConfig = Field(default_factory=WindowingConfig)
+    segmentation: SegmentationConfig = Field(default_factory=SegmentationConfig)
+    annotation: AnnotationConfig = Field(default_factory=AnnotationConfig)
+    infidata: InfiDataConfig = Field(default_factory=InfiDataConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    visualization: VisualizationConfig = Field(default_factory=VisualizationConfig)
     progress: ProgressConfig = Field(default_factory=ProgressConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
@@ -147,6 +257,8 @@ class Config(BaseModel):
             if not isinstance(headers, dict):
                 raise ValueError("REMOTE_API_HEADERS must be a JSON object")
             config.worker.remote_api.headers = headers
+        if "SEGMENTATION_MODE" in os.environ:
+            config.segmentation.mode = SegmentationConfig(mode=os.environ["SEGMENTATION_MODE"]).mode
         
         return config
     

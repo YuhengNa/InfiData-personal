@@ -12,7 +12,8 @@ from PIL import Image
 
 from ..config import Config
 from ..vlm import create_backend
-from ..prompt import prompt_switch_detection
+from ..prompt import prompt_for_annotations
+from ..validation import validate_memory_annotation
 
 MAX_LOCAL_RETRIES = 2
 
@@ -25,16 +26,32 @@ def decode_b64_to_numpy(b64_str: str) -> Optional[np.ndarray]:
     """Decode base64 string to numpy BGR array."""
     if not b64_str:
         return None
-    
+
     try:
         img_bytes = base64.b64decode(b64_str)
         img = Image.open(BytesIO(img_bytes)).convert("RGB")
-        # Convert RGB to BGR for OpenCV compatibility
+        # Convert RGB to BGR for OpenCV compatibility.
         rgb_array = np.array(img)
-        bgr_array = rgb_array[:, :, ::-1]
-        return bgr_array
+        return rgb_array[:, :, ::-1]
     except Exception:
         return None
+
+
+def format_subtask_context(meta: Dict[str, Any]) -> str:
+    segments = meta.get("subtask_segments") or []
+    if not segments:
+        return ""
+
+    lines = [
+        "\n\n### Existing Subtask Segments for This Window",
+        "Use these existing subtask annotations as context. Memory boundaries may align with them, but only change memory when persistent facts change.",
+        "The ranges below are original video frame numbers for context only. Do not copy them into transitions; transitions must use sampled image indices.",
+    ]
+    for seg in segments:
+        lines.append(
+            f"- frames {seg.get('start_frame')}-{seg.get('end_frame')}: {seg.get('subtask', '')}"
+        )
+    return "\n".join(lines)
 
 
 def run_worker(config: Config) -> None:
@@ -58,6 +75,8 @@ def run_worker(config: Config) -> None:
     
     backend = create_backend(config.worker.backend, **backend_kwargs)
     print(f"[Worker] Using backend: {backend.name}")
+    print(f"[Worker] Segmentation mode: {config.segmentation.mode}")
+    print(f"[Worker] Annotation targets: {config.annotation.targets}")
     backend.warmup()
     
     print(f"[Worker] Connecting to {server_url}")
@@ -109,19 +128,45 @@ def run_worker(config: Config) -> None:
                         images.append(np.zeros((224, 224, 3), dtype=np.uint8))
                 
                 # Run inference with proper prompt (local retry on empty output)
-                prompt = prompt_switch_detection(len(images))
+                prompt = prompt_for_annotations(
+                    len(images),
+                    segmentation_mode=config.segmentation.mode,
+                    targets=config.annotation.targets,
+                )
+                if config.memory.use_subtask_context:
+                    prompt += format_subtask_context(job.get("meta", {}))
                 vlm_json: Dict[str, Any] = {}
+                retry_feedback = ""
                 
                 for attempt in range(MAX_LOCAL_RETRIES):
                     try:
-                        vlm_json = backend.infer(images, prompt)
+                        vlm_json = backend.infer(images, prompt + retry_feedback)
                     except Exception as e:
                         print(f"[Err] Inference failed: {e}")
                         vlm_json = {}
                     
-                    if not _is_empty_vlm_json(vlm_json):
+                    validation_error = None
+                    if not _is_empty_vlm_json(vlm_json) and "memory" in config.annotation.targets:
+                        validation_error = validate_memory_annotation(
+                            vlm_json,
+                            len(images),
+                            nested=len(config.annotation.targets) > 1,
+                        )
+
+                    if not _is_empty_vlm_json(vlm_json) and validation_error is None:
                         break
                     
+                    if validation_error:
+                        print(
+                            f"[Warn] {task_id} Invalid VLM JSON: {validation_error} "
+                            f"(attempt {attempt + 1}/{MAX_LOCAL_RETRIES})"
+                        )
+                        retry_feedback = (
+                            f"\n\nYour previous response was invalid: {validation_error}. "
+                            "Regenerate the complete JSON and follow the output schema exactly."
+                        )
+                        vlm_json = {}
+                        continue
                     print(
                         f"[Warn] {task_id} Empty VLM JSON "
                         f"(attempt {attempt + 1}/{MAX_LOCAL_RETRIES})"
@@ -130,7 +175,13 @@ def run_worker(config: Config) -> None:
                 if _is_empty_vlm_json(vlm_json):
                     print(f"[Fail] {task_id} Returning empty to trigger server retry")
                 else:
-                    print(f"[Done] {task_id} ({len(images)}f) -> Cuts: {vlm_json.get('transitions', [])}")
+                    subtask_json = vlm_json.get("subtask", vlm_json)
+                    memory_json = vlm_json.get("memory", {})
+                    print(
+                        f"[Done] {task_id} ({len(images)}f) -> "
+                        f"Subtask cuts: {subtask_json.get('transitions', [])}; "
+                        f"Memory cuts: {memory_json.get('transitions', [])}"
+                    )
                 
                 # Submit result
                 requests.post(
