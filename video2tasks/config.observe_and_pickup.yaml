@@ -1,12 +1,12 @@
 datasets:
-  - root: "/mnt/workspace/InfiData/Rmbench_infi"
+  - root: "/mnt/workspace/InfiData/Rmbench_infi_fixrgb"
     subset: "observe_and_pickup"
     format: "infidata"
     video_key: "cam_high"
 
 run:
   base_dir: "/mnt/workspace/wudi/InfiData-personal/video2tasks/runs"
-  run_id: "observe_and_pickup_memory_v1"
+  run_id: "observe_and_pickup_memory_fixrgb_v1"
 
 server:
   host: "127.0.0.1"
