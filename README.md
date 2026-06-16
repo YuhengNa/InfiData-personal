@@ -57,8 +57,11 @@ InfiData/
 ├── scripts/
 │   ├── convert/
 │   │   ├── convert_aloha_cosmos_mini.py
+│   │   ├── convert_droid.py
 │   │   ├── convert_droid_mini.py
 │   │   ├── convert_interdata_a1_sim_updated_mini.py
+│   │   ├── convert_robocoin.py
+│   │   ├── convert_robomind.py
 │   │   └── convert_rmbench_mini.py
 │   ├── convert2openpi/
 │   │   └── convert_rmbench.py
@@ -278,6 +281,48 @@ python scripts/convert2openpi/convert_rmbench.py \
   --use_images \
   --overwrite
 ```
+
+### 7) 转换 RoboCOIN、RoboMIND 与 DROID 全量数据
+
+以下脚本默认输出到 `/mnt/workspace/InfiData/<DATASET>`。`--num_episodes 0`
+表示转换全部可用 episode；调试时可设为较小正整数。
+
+RoboCOIN：
+
+```bash
+python scripts/convert/convert_robocoin.py \
+  --robocoin_root /mnt/workspace/wudi/ELUBrain/RoboCOIN_data/RoboCOIN \
+  --out_root /mnt/workspace/InfiData/RoboCOIN \
+  --num_episodes 0
+```
+
+RoboMIND 当前源目录是分卷压缩包。脚本可先仅提取其中的
+`trajectory.hdf5`，再直接转换：
+
+```bash
+python scripts/convert/convert_robomind.py \
+  --robomind_root /mnt/workspace/szeluresearch/ELUBrain/RoboMIND \
+  --extract_root /mnt/workspace/szeluresearch/ELUBrain/RoboMIND_extracted \
+  --annotation_json /mnt/workspace/szeluresearch/ELUBrain/RoboMIND_split/cobot-magic/static/language_description_annotation_json/h5_agilex_3rgb.json \
+  --out_root /mnt/workspace/InfiData/RoboMIND \
+  --num_episodes 0
+```
+
+DROID：
+
+```bash
+python scripts/convert/convert_droid.py \
+  --droid_root /mnt/workspace/szeluresearch/ELUBrain/DROID \
+  --out_root /mnt/workspace/InfiData/DROID \
+  --num_episodes 0
+```
+
+三个全量转换器均支持：
+
+1. `--no_videos`：只转换状态、动作和标注。
+2. `--overwrite`：覆盖已存在的目标 episode/video。
+3. `--strict`：遇到首个坏 episode 立即失败；默认跳过并写入
+   `meta/stats.json`。
 
 `--use_images` 会把三路相机帧写为 LeRobot `image` feature，适合直接检查和接入 openpi 训练。若希望输出 LeRobot `video` feature，可以去掉 `--use_images`。
 
