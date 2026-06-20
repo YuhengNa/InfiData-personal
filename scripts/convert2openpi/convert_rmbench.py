@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from video_decode_utils import ffmpeg_read_frames
+
 
 CAMERA_KEYS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 IMAGE_FEATURE_PREFIX = "observation.images"
@@ -41,13 +43,13 @@ class VideoFrameReader:
         if cap is None:
             cap = cv2.VideoCapture(str(video_path))
             if not cap.isOpened():
-                raise RuntimeError(f"Failed to open video: {video_path}")
+                return ffmpeg_read_frames(video_path, [int(frame_index)])[0]
             self._captures[video_path] = cap
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
         ok, bgr = cap.read()
         if not ok or bgr is None:
-            raise RuntimeError(f"Failed to read frame {frame_index} from {video_path}")
+            return ffmpeg_read_frames(video_path, [int(frame_index)])[0]
         return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
