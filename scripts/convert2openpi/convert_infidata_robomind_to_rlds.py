@@ -385,87 +385,105 @@ class RobomindInfidata(tfds.core.GeneratorBasedBuilder):
 
         try:
             for episode in episodes:
-                rows = pd.read_parquet(self._infidata_root / episode.parquet_path).reset_index(drop=True)
-                if rows.empty:
-                    progress.update(1)
-                    continue
-                length = len(rows)
+                try:
+                    rows = pd.read_parquet(self._infidata_root / episode.parquet_path).reset_index(drop=True)
+                    if rows.empty:
+                        progress.update(1)
+                        continue
+                    length = len(rows)
 
-                clips = {}
-                failed = False
-                for camera in CAMERAS:
-                    video_path = self._infidata_root / _as_text(rows[f"video.{camera}.path"].iloc[0])
-                    try:
-                        clips[camera] = _read_video_frames(video_path, length)
-                    except Exception as exc:
-                        append_skip(
-                            self._skip_log_path,
-                            {
-                                "dataset": "RoboMIND",
-                                "split": split_name,
-                                "episode_index": episode.episode_index,
-                                "camera": camera,
-                                "video_path": str(video_path),
-                                "length": length,
-                                "error": repr(exc),
+                    clips = {}
+                    failed = False
+                    for camera in CAMERAS:
+                        video_path = self._infidata_root / _as_text(rows[f"video.{camera}.path"].iloc[0])
+                        try:
+                            clips[camera] = _read_video_frames(video_path, length)
+                        except Exception as exc:
+                            append_skip(
+                                self._skip_log_path,
+                                {
+                                    "dataset": "RoboMIND",
+                                    "split": split_name,
+                                    "episode_index": episode.episode_index,
+                                    "camera": camera,
+                                    "video_path": str(video_path),
+                                    "length": length,
+                                    "error": repr(exc),
+                                },
+                            )
+                            print(
+                                f"[skip] RoboMIND {split_name} episode={episode.episode_index} "
+                                f"camera={camera}: {exc}",
+                                flush=True,
+                            )
+                            failed = True
+                            break
+                    if failed:
+                        progress.update(1)
+                        continue
+
+                    steps = []
+                    for i, row in rows.iterrows():
+                        is_last = i == length - 1
+                        step = {
+                            "episode_index": int(row.get("episode_index", episode.episode_index)),
+                            "frame_index": int(row.get("frame_index", i)),
+                            "timestamp": np.float32(row.get("timestamp", 0.0)),
+                            "observation": {
+                                "state": _as_float_array(row["observation.state"], (self._state_dim,)),
+                                "images": {camera: clips[camera][i] for camera in CAMERAS},
                             },
-                        )
-                        print(
-                            f"[skip] RoboMIND {split_name} episode={episode.episode_index} "
-                            f"camera={camera}: {exc}",
-                            flush=True,
-                        )
-                        failed = True
-                        break
-                if failed:
-                    progress.update(1)
-                    continue
-
-                steps = []
-                for i, row in rows.iterrows():
-                    is_last = i == length - 1
-                    step = {
-                        "episode_index": int(row.get("episode_index", episode.episode_index)),
-                        "frame_index": int(row.get("frame_index", i)),
-                        "timestamp": np.float32(row.get("timestamp", 0.0)),
-                        "observation": {
-                            "state": _as_float_array(row["observation.state"], (self._state_dim,)),
-                            "images": {camera: clips[camera][i] for camera in CAMERAS},
-                        },
-                        "action": _as_float_array(row["action"], (self._action_dim,)),
-                        "quality": int(row.get("quality", 0)),
-                        "speed_bin": int(row.get("speed_bin", 0)),
-                        "mistake": _as_bool(row.get("mistake", False)),
-                        "success": _as_bool(row.get("success", True)),
-                        "video": {
-                            camera: {
-                                "path": _as_text(row.get(f"video.{camera}.path"), ""),
-                                "frame_index": int(row.get(f"video.{camera}.frame_index", i)),
-                            }
-                            for camera in CAMERAS
-                        },
-                        "subgoal": {
-                            "real_future": {
+                            "action": _as_float_array(row["action"], (self._action_dim,)),
+                            "quality": int(row.get("quality", 0)),
+                            "speed_bin": int(row.get("speed_bin", 0)),
+                            "mistake": _as_bool(row.get("mistake", False)),
+                            "success": _as_bool(row.get("success", True)),
+                            "video": {
                                 camera: {
-                                    "path": _as_text(row.get(f"subgoal.real_future.{camera}.path"), ""),
-                                    "frame_index": int(row.get(f"subgoal.real_future.{camera}.frame_index", i)),
+                                    "path": _as_text(row.get(f"video.{camera}.path"), ""),
+                                    "frame_index": int(row.get(f"video.{camera}.frame_index", i)),
                                 }
                                 for camera in CAMERAS
-                            }
+                            },
+                            "subgoal": {
+                                "real_future": {
+                                    camera: {
+                                        "path": _as_text(row.get(f"subgoal.real_future.{camera}.path"), ""),
+                                        "frame_index": int(row.get(f"subgoal.real_future.{camera}.frame_index", i)),
+                                    }
+                                    for camera in CAMERAS
+                                }
+                            },
+                            "discount": np.float32(1.0),
+                            "reward": np.float32(1.0 if is_last and _as_bool(row.get("success", True)) else 0.0),
+                            "is_first": i == 0,
+                            "is_last": is_last,
+                            "is_terminal": is_last,
+                        }
+                        for column in TEXT_COLUMNS:
+                            step[column] = _as_text(row.get(column), "")
+                        steps.append(step)
+
+                    episode_metadata = self._episode_metadata(episode, rows)
+                except Exception as exc:
+                    append_skip(
+                        self._skip_log_path,
+                        {
+                            "dataset": "RoboMIND",
+                            "split": split_name,
+                            "episode_index": episode.episode_index,
+                            "parquet_path": episode.parquet_path,
+                            "error": "episode_conversion_error",
+                            "exception": repr(exc),
                         },
-                        "discount": np.float32(1.0),
-                        "reward": np.float32(1.0 if is_last and _as_bool(row.get("success", True)) else 0.0),
-                        "is_first": i == 0,
-                        "is_last": is_last,
-                        "is_terminal": is_last,
-                    }
-                    for column in TEXT_COLUMNS:
-                        step[column] = _as_text(row.get(column), "")
-                    steps.append(step)
+                    )
+                    print(f"[skip] RoboMIND {split_name} episode={episode.episode_index}: {exc}", flush=True)
+                    progress.update(1)
+                    continue
 
                 yield str(episode.episode_index), {
                     "steps": steps,
-                    "episode_metadata": self._episode_metadata(episode, rows),
+                    "episode_metadata": episode_metadata,
                 }
 
                 completed_frames += length

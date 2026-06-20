@@ -660,14 +660,93 @@ class EgoVerseInfidata(tfds.core.GeneratorBasedBuilder):
         image_columns = [f"images.{camera}" for camera in self._cameras]
         try:
             for episode in episodes:
-                rows = pd.read_parquet(self._infidata_root / episode.parquet_path).reset_index(drop=True)
-                if rows.empty:
-                    progress.update(1)
-                    continue
-                length = len(rows)
-                expected_columns = set(self._float_vector_columns) | set(self._int_scalar_columns)
-                missing_columns = sorted(expected_columns - set(rows.columns))
-                if missing_columns:
+                try:
+                    rows = pd.read_parquet(self._infidata_root / episode.parquet_path).reset_index(drop=True)
+                    if rows.empty:
+                        progress.update(1)
+                        continue
+                    length = len(rows)
+                    expected_columns = set(self._float_vector_columns) | set(self._int_scalar_columns)
+                    missing_columns = sorted(expected_columns - set(rows.columns))
+                    if missing_columns:
+                        append_skip(
+                            self._skip_log_path,
+                            {
+                                "dataset": "EgoVerse",
+                                "split": split_name,
+                                "episode_index": episode.episode_index,
+                                "source_episode_index": episode.source_episode_index,
+                                "schema_key": self._schema_key,
+                                "parquet_path": episode.parquet_path,
+                                "missing_columns": missing_columns,
+                                "error": "missing_schema_columns",
+                            },
+                        )
+                        print(
+                            f"[skip] EgoVerse {split_name} episode={episode.episode_index}: "
+                            f"missing columns {missing_columns}",
+                            flush=True,
+                        )
+                        progress.update(1)
+                        continue
+
+                    steps = []
+                    for i, row in rows.iterrows():
+                        is_last = i == length - 1
+                        step = {
+                            "episode_index": int(row.get("episode_index", episode.episode_index)),
+                            "source_episode_index": episode.source_episode_index,
+                            "source_episode_id": _as_text(row.get("source_episode_id"), episode.source_episode_id),
+                            "frame_index": int(row.get("frame_index", i)),
+                            "timestamp": np.float32(row.get("timestamp", 0.0)),
+                            "observation": {
+                                "state": _as_float_array(row["observation.state"], (self._state_dim,)),
+                                "ee_pose": _as_float_array(row["observations.state.ee_pose"], (self._state_dim,)),
+                                "images": {
+                                    camera: row[column]
+                                    for camera, column in zip(self._cameras, image_columns, strict=True)
+                                },
+                            },
+                            "action": _as_float_array(row["action"], (self._action_dim,)),
+                            "actions_cartesian": _as_float_matrix(
+                                row["actions_cartesian"],
+                                (self._action_chunk_length, self._action_dim),
+                            ),
+                            "action_source_horizon": int(row.get("action_source_horizon", 0)),
+                            "action_chunk_length": int(row.get("action_chunk_length", self._action_chunk_length)),
+                            "action_stride": int(row.get("action_stride", 0)),
+                            "quality": int(row.get("quality", 0)),
+                            "speed_bin": int(row.get("speed_bin", 0)),
+                            "mistake": _as_bool(row.get("mistake", False)),
+                            "success": _as_bool(row.get("success", True)),
+                            "annotation_active_indices_json": _annotation_indices_json(
+                                row.get("annotations.active_indices")
+                            ),
+                            "annotation_active_texts_json": _annotation_texts_json(row.get("annotations.active_texts")),
+                            "annotations_active_records_json": _as_text(
+                                row.get("annotations.active_records_json"), "{}"
+                            ),
+                            "discount": np.float32(1.0),
+                            "reward": np.float32(1.0 if is_last and _as_bool(row.get("success", True)) else 0.0),
+                            "is_first": i == 0,
+                            "is_last": is_last,
+                            "is_terminal": is_last,
+                        }
+                        for column in TEXT_COLUMNS:
+                            step[column] = _as_text(row.get(column), "")
+                        if self._float_vector_columns:
+                            step["source_float_vectors"] = {
+                                key: _as_float_array(row[source], self._float_vector_columns[source])
+                                for key, source in self._float_key_to_source.items()
+                            }
+                        if self._int_scalar_columns:
+                            step["source_int_scalars"] = {
+                                key: int(row.get(source, 0)) for key, source in self._int_key_to_source.items()
+                            }
+                        steps.append(step)
+
+                    episode_metadata = self._episode_metadata(episode, rows)
+                except Exception as exc:
                     append_skip(
                         self._skip_log_path,
                         {
@@ -677,76 +756,20 @@ class EgoVerseInfidata(tfds.core.GeneratorBasedBuilder):
                             "source_episode_index": episode.source_episode_index,
                             "schema_key": self._schema_key,
                             "parquet_path": episode.parquet_path,
-                            "missing_columns": missing_columns,
-                            "error": "missing_schema_columns",
+                            "error": "episode_conversion_error",
+                            "exception": repr(exc),
                         },
                     )
                     print(
-                        f"[skip] EgoVerse {split_name} episode={episode.episode_index}: "
-                        f"missing columns {missing_columns}",
+                        f"[skip] EgoVerse {split_name} episode={episode.episode_index}: {exc}",
                         flush=True,
                     )
                     progress.update(1)
                     continue
 
-                steps = []
-                for i, row in rows.iterrows():
-                    is_last = i == length - 1
-                    step = {
-                        "episode_index": int(row.get("episode_index", episode.episode_index)),
-                        "source_episode_index": episode.source_episode_index,
-                        "source_episode_id": _as_text(row.get("source_episode_id"), episode.source_episode_id),
-                        "frame_index": int(row.get("frame_index", i)),
-                        "timestamp": np.float32(row.get("timestamp", 0.0)),
-                        "observation": {
-                            "state": _as_float_array(row["observation.state"], (self._state_dim,)),
-                            "ee_pose": _as_float_array(row["observations.state.ee_pose"], (self._state_dim,)),
-                            "images": {
-                                camera: row[column]
-                                for camera, column in zip(self._cameras, image_columns, strict=True)
-                            },
-                        },
-                        "action": _as_float_array(row["action"], (self._action_dim,)),
-                        "actions_cartesian": _as_float_matrix(
-                            row["actions_cartesian"],
-                            (self._action_chunk_length, self._action_dim),
-                        ),
-                        "action_source_horizon": int(row.get("action_source_horizon", 0)),
-                        "action_chunk_length": int(row.get("action_chunk_length", self._action_chunk_length)),
-                        "action_stride": int(row.get("action_stride", 0)),
-                        "quality": int(row.get("quality", 0)),
-                        "speed_bin": int(row.get("speed_bin", 0)),
-                        "mistake": _as_bool(row.get("mistake", False)),
-                        "success": _as_bool(row.get("success", True)),
-                        "annotation_active_indices_json": _annotation_indices_json(
-                            row.get("annotations.active_indices")
-                        ),
-                        "annotation_active_texts_json": _annotation_texts_json(row.get("annotations.active_texts")),
-                        "annotations_active_records_json": _as_text(
-                            row.get("annotations.active_records_json"), "{}"
-                        ),
-                        "discount": np.float32(1.0),
-                        "reward": np.float32(1.0 if is_last and _as_bool(row.get("success", True)) else 0.0),
-                        "is_first": i == 0,
-                        "is_last": is_last,
-                        "is_terminal": is_last,
-                    }
-                    for column in TEXT_COLUMNS:
-                        step[column] = _as_text(row.get(column), "")
-                    if self._float_vector_columns:
-                        step["source_float_vectors"] = {
-                            key: _as_float_array(row[source], self._float_vector_columns[source])
-                            for key, source in self._float_key_to_source.items()
-                        }
-                    if self._int_scalar_columns:
-                        step["source_int_scalars"] = {
-                            key: int(row.get(source, 0)) for key, source in self._int_key_to_source.items()
-                        }
-                    steps.append(step)
-
                 yield str(episode.episode_index), {
                     "steps": steps,
-                    "episode_metadata": self._episode_metadata(episode, rows),
+                    "episode_metadata": episode_metadata,
                 }
 
                 completed_frames += length
