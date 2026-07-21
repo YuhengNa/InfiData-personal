@@ -20,12 +20,23 @@ List variants:
     python scripts/convert2openpi/convert_infidata_egoverse_to_rlds.py \
         --infidata-root /mnt/workspace/InfiData/EgoVerse \
         --list-schemas
+
+Full multi-shard export:
+    python scripts/convert2openpi/convert_infidata_egoverse_to_rlds.py \
+        --infidata-roots \
+            /mnt/workspace/InfiData/EgoVerse_full_1 \
+            /mnt/workspace/InfiData/EgoVerse_full_2 \
+            /mnt/workspace/InfiData/EgoVerse_full_3 \
+        --data-dir /mnt/workspace/RLDS/EgoVerse_full \
+        --all-schemas \
+        --overwrite
 """
 
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import io
 import json
 import os
 import re
@@ -40,6 +51,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import tensorflow_datasets as tfds
 import tqdm
+from PIL import Image
 
 from video_decode_utils import append_skip
 
@@ -99,6 +111,7 @@ MAX_TFDS_EXAMPLE_PARQUET_BYTES = int(1.8 * 1024**3)
 
 @dataclasses.dataclass(frozen=True)
 class InfiEpisode:
+    infidata_root: Path
     episode_index: int
     source_episode_index: int
     source_episode_id: str
@@ -198,6 +211,17 @@ def _load_robots_json(infidata_root: Path) -> dict[str, Any]:
     return robots
 
 
+def _load_merged_robots_json(infidata_roots: list[Path]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for root in infidata_roots:
+        robots = _load_robots_json(root)
+        for key, value in robots.items():
+            if key in merged and merged[key] != value:
+                raise ValueError(f"Conflicting robots.json entry for {key!r} between EgoVerse shards.")
+            merged[key] = value
+    return merged
+
+
 def _image_fields_from_episode(item: dict[str, Any]) -> tuple[str, ...]:
     fields = []
     for field in item.get("preserved_fields", []):
@@ -223,6 +247,7 @@ def _load_all_episodes(infidata_root: Path, robots_json: dict[str, Any]) -> list
                 raise KeyError(f"No robots.json schema for EgoVerse robot_type={schema_key!r}")
             episodes.append(
                 InfiEpisode(
+                    infidata_root=infidata_root,
                     episode_index=int(item["episode_index"]),
                     source_episode_index=int(item.get("source_episode_index", -1)),
                     source_episode_id=_as_text(item.get("source_episode_id"), ""),
@@ -333,16 +358,16 @@ def _split_episodes(
     return train, unseen_test, seen_test
 
 
-def _read_sample_rows(infidata_root: Path, episode: InfiEpisode) -> pd.DataFrame:
-    return pd.read_parquet(infidata_root / episode.parquet_path).reset_index(drop=True)
+def _read_sample_rows(episode: InfiEpisode) -> pd.DataFrame:
+    return pd.read_parquet(episode.infidata_root / episode.parquet_path).reset_index(drop=True)
 
 
-def _parquet_columns(infidata_root: Path, episode: InfiEpisode) -> set[str]:
-    return set(pq.ParquetFile(infidata_root / episode.parquet_path).schema_arrow.names)
+def _parquet_columns(episode: InfiEpisode) -> set[str]:
+    return set(pq.ParquetFile(episode.infidata_root / episode.parquet_path).schema_arrow.names)
 
 
-def _parquet_size_bytes(infidata_root: Path, episode: InfiEpisode) -> int:
-    return (infidata_root / episode.parquet_path).stat().st_size
+def _parquet_size_bytes(episode: InfiEpisode) -> int:
+    return (episode.infidata_root / episode.parquet_path).stat().st_size
 
 
 def _image_shapes(episode: InfiEpisode, robot_config: dict[str, Any]) -> dict[str, tuple[int, int, int]]:
@@ -396,13 +421,33 @@ def _annotation_texts_json(value: Any) -> str:
         return "[]"
 
 
-def _source_metadata_json(infidata_root: Path, episode: InfiEpisode) -> str:
+def _source_metadata_json(episode: InfiEpisode) -> str:
     if not episode.source_metadata_path:
         return "{}"
-    path = infidata_root / episode.source_metadata_path
+    path = episode.infidata_root / episode.source_metadata_path
     if not path.exists():
         return "{}"
     return path.read_text(encoding="utf-8")
+
+
+def _decode_image_shape(value: Any) -> tuple[int, int, int]:
+    if isinstance(value, np.ndarray):
+        shape = tuple(int(dim) for dim in value.shape)
+        if len(shape) == 2:
+            return shape[0], shape[1], 1
+        if len(shape) == 3:
+            return shape
+        raise ValueError(f"Unsupported ndarray image shape: {shape}")
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, bytearray):
+        value = bytes(value)
+    if not isinstance(value, bytes):
+        raise TypeError(f"Expected image bytes or ndarray, got {type(value).__name__}")
+    with Image.open(io.BytesIO(value)) as image:
+        width, height = image.size
+        bands = len(image.getbands())
+    return int(height), int(width), int(bands)
 
 
 def _state_action_schema(robot_config: dict[str, Any], image_fields: tuple[str, ...]) -> dict[str, Any]:
@@ -574,6 +619,7 @@ class EgoVerseInfidata(tfds.core.GeneratorBasedBuilder):
                         "source_int_scalar_columns_json": tfds.features.Text(),
                         "raw_episode_metadata_json": tfds.features.Text(),
                         "source_metadata_json": tfds.features.Text(),
+                        "source_infidata_root": tfds.features.Text(),
                         "robots_json": tfds.features.Text(),
                         "tasks_json_path": tfds.features.Text(),
                         "stats_json_path": tfds.features.Text(),
@@ -640,11 +686,29 @@ class EgoVerseInfidata(tfds.core.GeneratorBasedBuilder):
             "source_float_vector_columns_json": _json_dumps(self._float_key_to_source),
             "source_int_scalar_columns_json": _json_dumps(self._int_key_to_source),
             "raw_episode_metadata_json": _json_dumps(episode.raw_json),
-            "source_metadata_json": _source_metadata_json(self._infidata_root, episode),
+            "source_metadata_json": _source_metadata_json(episode),
+            "source_infidata_root": str(episode.infidata_root),
             "robots_json": _json_dumps(self._robots_json),
-            "tasks_json_path": str(self._infidata_root / "meta" / "tasks.json"),
-            "stats_json_path": str(self._infidata_root / "meta" / "stats.json"),
+            "tasks_json_path": str(episode.infidata_root / "meta" / "tasks.json"),
+            "stats_json_path": str(episode.infidata_root / "meta" / "stats.json"),
         }
+
+    def _validate_episode_image_shapes(self, rows: pd.DataFrame, image_columns: list[str]) -> None:
+        mismatches = {}
+        for camera, column in zip(self._cameras, image_columns, strict=True):
+            expected_shape = self._image_shapes[camera]
+            for row_index, value in enumerate(rows[column]):
+                actual_shape = _decode_image_shape(value)
+                if actual_shape != expected_shape:
+                    mismatches[camera] = {
+                        "column": column,
+                        "row_index": int(row_index),
+                        "expected_shape": expected_shape,
+                        "actual_shape": actual_shape,
+                    }
+                    break
+        if mismatches:
+            raise ValueError(f"incompatible_image_shape: {mismatches}")
 
     def _generate_examples(self, split_name: str, episodes: list[InfiEpisode]):
         total_frames = sum(episode.num_frames for episode in episodes)
@@ -661,11 +725,30 @@ class EgoVerseInfidata(tfds.core.GeneratorBasedBuilder):
         try:
             for episode in episodes:
                 try:
-                    rows = pd.read_parquet(self._infidata_root / episode.parquet_path).reset_index(drop=True)
+                    rows = pd.read_parquet(episode.infidata_root / episode.parquet_path).reset_index(drop=True)
                     if rows.empty:
                         progress.update(1)
                         continue
                     length = len(rows)
+                    try:
+                        self._validate_episode_image_shapes(rows, image_columns)
+                    except Exception as exc:
+                        append_skip(
+                            self._skip_log_path,
+                            {
+                                "dataset": "EgoVerse",
+                                "split": split_name,
+                                "episode_index": episode.episode_index,
+                                "source_episode_index": episode.source_episode_index,
+                                "schema_key": self._schema_key,
+                                "parquet_path": episode.parquet_path,
+                                "error": "incompatible_image_shape",
+                                "exception": repr(exc),
+                            },
+                        )
+                        print(f"[skip] EgoVerse {split_name} episode={episode.episode_index}: {exc}", flush=True)
+                        progress.update(1)
+                        continue
                     expected_columns = set(self._float_vector_columns) | set(self._int_scalar_columns)
                     missing_columns = sorted(expected_columns - set(rows.columns))
                     if missing_columns:
@@ -824,7 +907,7 @@ def _build_one_variant(
         max_episodes=None,
     )
     canonical_episode = canonical_episodes[0]
-    sample_rows = _read_sample_rows(infidata_root, canonical_episode)
+    sample_rows = _read_sample_rows(canonical_episode)
     image_shapes = _image_shapes(canonical_episode, robot_config)
     float_vector_columns, int_scalar_columns = _vector_columns(sample_rows)
     image_fields = tuple(f"images.{camera}" for camera in variant.cameras)
@@ -843,7 +926,7 @@ def _build_one_variant(
     expected_columns = set(float_vector_columns) | set(int_scalar_columns)
     valid_episodes: list[InfiEpisode] = []
     for episode in selected_episodes:
-        parquet_size_bytes = _parquet_size_bytes(infidata_root, episode)
+        parquet_size_bytes = _parquet_size_bytes(episode)
         if parquet_size_bytes > MAX_TFDS_EXAMPLE_PARQUET_BYTES:
             append_skip(
                 skip_log_path,
@@ -860,7 +943,7 @@ def _build_one_variant(
                 },
             )
             continue
-        missing_columns = sorted(expected_columns - _parquet_columns(infidata_root, episode))
+        missing_columns = sorted(expected_columns - _parquet_columns(episode))
         if missing_columns:
             append_skip(
                 skip_log_path,
@@ -949,6 +1032,13 @@ def _build_one_variant(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--infidata-root", type=Path, default=Path("/mnt/workspace/InfiData/EgoVerse"))
+    parser.add_argument(
+        "--infidata-roots",
+        type=Path,
+        nargs="+",
+        default=None,
+        help="One or more InfiData roots to merge before exporting RLDS. Overrides --infidata-root.",
+    )
     parser.add_argument("--data-dir", type=Path, default=Path("/mnt/workspace/RLDS/EgoVerse"))
     parser.add_argument("--schema-key", type=str, default=None)
     parser.add_argument("--camera-set", type=str, default=None, help="Comma-separated camera names, e.g. front_1.")
@@ -976,8 +1066,11 @@ def main() -> None:
 
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
-    robots_json = _load_robots_json(args.infidata_root)
-    all_episodes = _load_all_episodes(args.infidata_root, robots_json)
+    infidata_roots = args.infidata_roots if args.infidata_roots is not None else [args.infidata_root]
+    robots_json = _load_merged_robots_json(infidata_roots)
+    all_episodes: list[InfiEpisode] = []
+    for infidata_root in infidata_roots:
+        all_episodes.extend(_load_all_episodes(infidata_root, robots_json))
     variants = _schema_variants(all_episodes, robots_json)
 
     if args.list_schemas:

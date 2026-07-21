@@ -19,7 +19,7 @@
     "task": { "type": "string" },
     "subtask": { "type": "string" },
     "robot_type": { "type": "string" },
-    "control_mode": { "type": "string", "enum": ["joint", "ee", "unknown"] },
+    "control_mode": { "type": "string", "enum": ["joint", "ee", "egoverse_cartesian", "unknown"] },
     "quality": { "type": "integer", "minimum": 1, "maximum": 5 },
     "speed_bin": { "type": "integer" },
     "mistake": { "type": "boolean" },

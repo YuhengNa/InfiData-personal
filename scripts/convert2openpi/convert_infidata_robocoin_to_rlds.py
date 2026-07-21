@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 import tensorflow_datasets as tfds
 import tqdm
+from tensorflow_datasets.core import example_serializer
 
 from video_decode_utils import append_skip, ffmpeg_read_frames
 
@@ -100,6 +101,8 @@ ROBOCOIN_EEF_POSE_SCHEMA = {
         "simulation space to camera coordinates."
     ),
 }
+
+MAX_TFDS_EXAMPLE_RAW_IMAGE_BYTES = 30 * 1024**3
 
 
 @dataclasses.dataclass(frozen=True)
@@ -482,6 +485,8 @@ class RobocoinInfidata(tfds.core.GeneratorBasedBuilder):
         self._robots_json = robots_json
         self._original_feature_schema = original_feature_schema
         self._skip_log_path = Path(skip_log_path)
+        self._video_shape_cache: dict[str, tuple[int, int, int]] = {}
+        self._tfds_example_serializer: example_serializer.ExampleSerializer | None = None
         super().__init__(**kwargs)
 
     def _info(self) -> tfds.core.DatasetInfo:
@@ -654,6 +659,40 @@ class RobocoinInfidata(tfds.core.GeneratorBasedBuilder):
             clips[camera] = _read_frames_from_video(path, frame_indices)
         return clips
 
+    def _validate_episode_image_shapes(self, rows: pd.DataFrame) -> None:
+        mismatches = {}
+        for camera in self._cameras:
+            rel_path = _as_text(rows[f"video.{camera}.path"].iloc[0])
+            video_path = self._infidata_root / rel_path
+            frame_index = int(rows[f"video.{camera}.frame_index"].iloc[0])
+            cache_key = f"{video_path}:{frame_index}"
+            actual_shape = self._video_shape_cache.get(cache_key)
+            if actual_shape is None:
+                actual_shape = tuple(int(dim) for dim in _read_frames_from_video(video_path, [frame_index])[0].shape)
+                self._video_shape_cache[cache_key] = actual_shape
+            expected_shape = self._image_shapes[camera]
+            if actual_shape != expected_shape:
+                mismatches[camera] = {
+                    "path": str(video_path),
+                    "expected_shape": expected_shape,
+                    "actual_shape": actual_shape,
+                }
+        if mismatches:
+            raise ValueError(f"incompatible_image_shape: {mismatches}")
+
+    def _estimated_raw_image_bytes(self, num_frames: int) -> int:
+        bytes_per_step = sum(int(np.prod(self._image_shapes[camera])) for camera in self._cameras)
+        return int(num_frames) * bytes_per_step
+
+    def _preflight_tfds_serialization(self, example: dict[str, Any]) -> None:
+        """Run TFDS encode/serialize before yielding so bad episodes can be skipped."""
+        encoded = self.info.features.encode_example(example)
+        if self._tfds_example_serializer is None:
+            self._tfds_example_serializer = example_serializer.ExampleSerializer(
+                self.info.features.get_serialized_info()
+            )
+        self._tfds_example_serializer.serialize_example(encoded)
+
     def _generate_examples(self, split_name: str, episodes: list[InfiEpisode]):
         total_frames = sum(episode.num_frames for episode in episodes)
         started = time.time()
@@ -673,6 +712,50 @@ class RobocoinInfidata(tfds.core.GeneratorBasedBuilder):
                         progress.update(1)
                         continue
                     length = len(rows)
+                    estimated_raw_image_bytes = self._estimated_raw_image_bytes(length)
+                    if estimated_raw_image_bytes > MAX_TFDS_EXAMPLE_RAW_IMAGE_BYTES:
+                        append_skip(
+                            self._skip_log_path,
+                            {
+                                "dataset": "RoboCOIN",
+                                "split": split_name,
+                                "episode_index": episode.episode_index,
+                                "source_episode_index": episode.source_episode_index,
+                                "schema_key": self._schema_key,
+                                "parquet_path": episode.parquet_path,
+                                "num_frames": length,
+                                "estimated_raw_image_bytes": estimated_raw_image_bytes,
+                                "max_raw_image_bytes": MAX_TFDS_EXAMPLE_RAW_IMAGE_BYTES,
+                                "error": "episode_too_large_for_tfds_example",
+                            },
+                        )
+                        print(
+                            f"[skip] RoboCOIN {split_name} episode={episode.episode_index}: "
+                            f"estimated raw image bytes {estimated_raw_image_bytes:,} exceeds "
+                            f"{MAX_TFDS_EXAMPLE_RAW_IMAGE_BYTES:,}",
+                            flush=True,
+                        )
+                        progress.update(1)
+                        continue
+                    try:
+                        self._validate_episode_image_shapes(rows)
+                    except Exception as exc:
+                        append_skip(
+                            self._skip_log_path,
+                            {
+                                "dataset": "RoboCOIN",
+                                "split": split_name,
+                                "episode_index": episode.episode_index,
+                                "source_episode_index": episode.source_episode_index,
+                                "schema_key": self._schema_key,
+                                "parquet_path": episode.parquet_path,
+                                "error": "incompatible_image_shape",
+                                "exception": repr(exc),
+                            },
+                        )
+                        print(f"[skip] RoboCOIN {split_name} episode={episode.episode_index}: {exc}", flush=True)
+                        progress.update(1)
+                        continue
                     try:
                         clips = self._read_episode_images(rows)
                     except Exception as exc:
@@ -760,10 +843,36 @@ class RobocoinInfidata(tfds.core.GeneratorBasedBuilder):
                     progress.update(1)
                     continue
 
-                yield str(episode.episode_index), {
+                example = {
                     "steps": steps,
                     "episode_metadata": episode_metadata,
                 }
+                try:
+                    self._preflight_tfds_serialization(example)
+                except Exception as exc:
+                    append_skip(
+                        self._skip_log_path,
+                        {
+                            "dataset": "RoboCOIN",
+                            "split": split_name,
+                            "episode_index": episode.episode_index,
+                            "source_episode_index": episode.source_episode_index,
+                            "schema_key": self._schema_key,
+                            "parquet_path": episode.parquet_path,
+                            "num_frames": length,
+                            "error": "tfds_preflight_serialize_error",
+                            "exception": repr(exc),
+                        },
+                    )
+                    print(
+                        f"[skip] RoboCOIN {split_name} episode={episode.episode_index}: "
+                        f"TFDS preflight serialization failed: {exc}",
+                        flush=True,
+                    )
+                    progress.update(1)
+                    continue
+
+                yield str(episode.episode_index), example
 
                 completed_frames += length
                 elapsed = max(time.time() - started, 1e-6)

@@ -56,14 +56,25 @@ InfiData/
 │   └── tasks/
 ├── scripts/
 │   ├── convert/
+│   │   ├── convert_agibot_modelscope.py
 │   │   ├── convert_aloha_cosmos_mini.py
 │   │   ├── convert_droid.py
 │   │   ├── convert_droid_mini.py
+│   │   ├── convert_egoverse_zarr_to_infidata.py
 │   │   ├── convert_interdata_a1_sim_updated_mini.py
+│   │   ├── convert_realworld_piper.py
 │   │   ├── convert_robocoin.py
 │   │   ├── convert_robomind.py
-│   │   └── convert_rmbench_mini.py
+│   │   ├── convert_rmbench_mini.py
+│   │   └── run_egoverse_infidata_shards.py
 │   ├── convert2openpi/
+│   │   ├── convert_infidata_agibot_to_rlds.py
+│   │   ├── convert_infidata_droid_to_rlds.py
+│   │   ├── convert_infidata_egoverse_to_rlds.py
+│   │   ├── convert_infidata_realworld_piper_to_rlds.py
+│   │   ├── convert_infidata_robocoin_to_rlds.py
+│   │   ├── convert_infidata_robomind_full_to_rlds.py
+│   │   ├── convert_infidata_robomind_to_rlds.py
 │   │   └── convert_rmbench.py
 │   ├── annotate/
 │   ├── subgoals/
@@ -83,8 +94,9 @@ InfiData/
 1. 三个 InfiData 转换示例：ALOHA mini、DROID mini、RMBench mini。
 2. 一个 InterData-A1 `sim_updated` 到 InfiData 的转换示例。
 3. 统一 schema 与配置组织方式。
-4. 一个 InfiData 到 LeRobot/openpi 的转换示例。
-5. 一个可用于自动分段与指令生成的 video2tasks 模块。
+4. DROID、RoboCOIN、RoboMIND、AgiBot、EgoVerse 和 realworld_piper 的完整源数据到 InfiData、再到 RLDS 转换脚本。
+5. 一个 InfiData 到 LeRobot/openpi 的转换示例。
+6. 一个可用于自动分段与指令生成的 video2tasks 模块。
 
 ---
 
@@ -207,7 +219,7 @@ video2tasks 可用于长视频自动分段与指令草稿生成，典型流程�
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install numpy pandas pyarrow tqdm h5py jsonschema
+pip install numpy pandas pyarrow tqdm h5py jsonschema scipy zstandard
 ```
 
 ### 2) 生成 ALOHA mini 示例
@@ -325,6 +337,34 @@ python scripts/convert/convert_droid.py \
    `meta/stats.json`。
 
 `--use_images` 会把三路相机帧写为 LeRobot `image` feature，适合直接检查和接入 openpi 训练。若希望输出 LeRobot `video` feature，可以去掉 `--use_images`。
+
+### 8) 转换 EgoVerse
+
+单 episode 或小批量转换：
+
+```bash
+python scripts/convert/convert_egoverse_zarr_to_infidata.py \
+  --input-root /mnt/workspace/wudi/ELUBrain/EgoVerseData \
+  --episode-id 2025-09-20-17-42-51-000000 \
+  --episode-index 0 \
+  --out-root /mnt/workspace/tmp/egoverse_infidata_smoke \
+  --clean-output \
+  --strict
+```
+
+全量数据建议使用固定 manifest 分成三个互不重叠的 shard：
+
+```bash
+python scripts/convert/run_egoverse_infidata_shards.py \
+  --input-root /mnt/workspace/wudi/ELUBrain/EgoVerseData \
+  --output-base /mnt/workspace/InfiData \
+  --prefix EgoVerse_full \
+  --manifest /mnt/workspace/InfiData/EgoVerse_full_manifest.jsonl \
+  --ranges 0:20000,20000:40000,40000:70000 \
+  --clean-output
+```
+
+转换得到的 `actions_cartesian` 为 `[100, 12]`：未来约 30 个源帧的左右手观测末端位姿，有 `obs_head_pose` 时转到当前头部坐标系，否则保持 source pose frame，再插值为 100 点；`action` 是 `actions_cartesian[0]`。详细复现命令见 `docs/wudi工作交接0713_数据格式转换.md`。
 
 ---
 

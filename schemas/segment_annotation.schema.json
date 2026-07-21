@@ -11,7 +11,18 @@
     "task": { "type": "string" },
     "subtask": { "type": "string" },
     "mistake": { "type": "boolean" },
-    "annotation_status": { "type": "string", "enum": ["auto_placeholder", "vlm_pseudo", "human_labeled", "reviewed", "approved"] },
+    "annotation_status": {
+      "type": "string",
+      "enum": [
+        "auto_placeholder",
+        "source_annotation_v1",
+        "empty_source_annotations",
+        "vlm_pseudo",
+        "human_labeled",
+        "reviewed",
+        "approved"
+      ]
+    },
     "annotator": { "type": "string" },
     "reviewer": { "type": "string" }
   }
