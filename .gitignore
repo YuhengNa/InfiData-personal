@@ -24,6 +24,7 @@ videos/
 # 大生成文件
 data_full/
 outputs/
+quality_runs/
 checkpoints/
 *.pt
 *.pth

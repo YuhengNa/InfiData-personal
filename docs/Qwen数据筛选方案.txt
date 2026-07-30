@@ -1,0 +1,411 @@
+Qwen-RobotManip 的完整数据筛选由两部分组成：先进行 State-Action 信号质量筛选，再检查视频、语言和本体状态之间的跨模态一致性。我们去掉 S4 的 Joint-EEF 正运动学一致性和 S5 的世界坐标系/朝向统一，最终复现：{S1 + S2 + S3 + C1 + C2 + C3}
+
+------
+
+## S1. Sudden Change Detection
+
+### 状态与动作信号突变检测
+
+### 含义
+
+该模块用于发现 State 或 Action 轨迹中的**非正常瞬时跳变**，例如：
+
+- 数据采集或传输过程中产生的离散异常点；
+- packet loss 或传感器异常导致的瞬间跳变；
+- 轨迹中突然出现、不符合正常运动连续性的尖峰；
+- 物理碰撞导致的异常状态或动作信号。
+
+### 核心逻辑
+
+对于 State 和 Action 中的每一个信号维度，先通过：
+
+1. Median Filtering；
+2. Savitzky–Golay Smoothing；
+
+得到一条平滑轨迹。
+
+然后同时计算三种异常信号：
+
+- **Residual**：原始轨迹与平滑轨迹之间的绝对差；
+- **Acceleration**：轨迹的二阶有限差分；
+- **Jerk**：轨迹的三阶有限差分。
+
+只有当：
+
+[
+\text{Residual 异常}
+\quad\land\quad
+(\text{Acceleration 异常}\ \lor\ \text{Jerk 异常})
+]
+
+时，才将对应帧判断为突变。
+
+这种联合判定的目的，是避免把缓慢漂移或正常的大范围运动误判为异常，同时仍然能够识别非常突然的瞬态变化。
+
+论文强调，突变阈值不是所有数据统一设置，而是根据数据集特征分别确定，包括：
+
+- 机器人本体类型；
+- 旋转表示方式；
+- 真机数据或仿真数据；
+- 机器人底座是否移动。
+
+根据异常性质，可以只排除异常帧，也可以删除整条 episode。例如，某些仿真数据中的突然变化只会在碰撞时出现，因此论文直接删除相应 episode。
+
+------
+
+## S2. State-Action Trend Alignment
+
+### State 与 Action 趋势及时序一致性
+
+### 含义
+
+该模块用于检查 State 和 Action 是否正确配对，主要发现：
+
+- State 与 Action 的时间戳不同步；
+- Action 数据丢包；
+- State 与 Action 在时间轴上发生错位；
+- State 的变化方向与 Action 指令方向不一致；
+- State 已经变化后，Action 才出现的反因果现象。
+
+### 核心逻辑
+
+论文基于一个控制系统中的因果规律：
+
+> 正确记录的数据中，Action 指令应该领先于 State 的变化，或者至少与 State 的变化同时发生。
+
+对于 State 和 Action 中具有相同物理含义的 joint 维度，依次进行：
+
+1. 分别平滑 State 和 Action 轨迹；
+2. 通过 cross-correlation 寻找二者最合理的时间延迟；
+3. 根据最优时间延迟对齐 State 和 Action；
+4. 计算二者一阶差分方向的一致程度，即 Directional Agreement，简称 DA。
+
+如果 Action 指令变大时，State 也朝相同方向变化，则认为趋势一致；如果两者长期相反或不存在对应关系，则 DA 较低。
+
+当某个维度的 DA 低于该数据集设定的阈值时，相关 episode 会被排除。论文中使用的 DA 阈值通常位于 (0.6\sim0.7) 之间。
+
+对于使用 delta action 的数据，不能直接将 delta action 与绝对 joint state 比较。因此论文会先将 delta action 沿时间积分，恢复为近似的绝对动作轨迹，再与 State 进行趋势对齐检查。
+
+由于我们不复现 S4，因此 S2 只检查 State 和 Action 中**本身具有相同表示与物理语义的维度**，不通过 FK 将 joint 与 EEF 相互转换。
+
+------
+
+## S3. Extreme Value Filtering
+
+### State 与 Action 极端值过滤
+
+### 含义
+
+该模块用于排除 State 或 Action 中严重偏离正常分布的极端值。
+
+这些极端值不仅可能代表错误数据，还会破坏后续基于 (q_{01}) 和 (q_{99}) 的归一化，使大部分正常动作被压缩到很小的数值区间。
+
+### 核心逻辑
+
+对于每种机器人本体的每一个 State/Action 维度，分别统计：
+
+[
+q_{01},\quad q_{99}
+]
+
+然后根据两个分位数之间的跨度构造一个扩展范围：
+
+[
+\left[
+q_{01}-\alpha(q_{99}-q_{01}),
+\quad
+q_{99}+\alpha(q_{99}-q_{01})
+\right]
+]
+
+如果某一帧的任意 State 或 Action 维度落在该范围之外，则排除该帧。
+
+因此，它不是简单地删除所有位于 (q_{01}) 和 (q_{99}) 之外的数据，而是在主体分布两侧额外保留一定的安全范围，仅过滤更加极端的长尾值。
+
+Gripper 维度不执行这一规则，因为夹爪通常主要分为“打开”和“关闭”两种状态，天然呈现双峰分布。使用普通的分位数极端值判断，容易把正常的开合状态误认为异常值。
+
+------
+
+## 当前代码实现：S1 + S2 + S3
+
+实现脚本：
+
+```text
+scripts/quality/filter_rlds_state_action.py
+```
+
+该脚本只读取 RLDS，生成异常清单、阈值和人工复核曲线，不修改原始 TFRecord。
+
+### S1 当前设计
+
+1. 对每个 episode 的每个 State/Action 维度依次使用：
+   - kernel=5 的 Median Filter；
+   - window=9、polyorder=2 的 Savitzky–Golay Filter。
+2. 计算原始信号的 Residual、二阶差分 Acceleration 和三阶差分 Jerk。
+3. 在整个待筛选 split 上按维度拟合基线：
+   - 中心值使用 median；
+   - 鲁棒尺度使用 `1.4826 × MAD`；
+   - 为避免分段恒定信号的 MAD 退化为 0，最小尺度取
+     `max(1e-6, 0.002 × (q99-q01))`。
+4. 默认异常阈值均为 8 个鲁棒尺度。只有
+   `Residual异常 AND (Acceleration异常 OR Jerk异常)` 才命中。
+5. NaN/Inf 直接视为异常。根据 `state_action_schema_json` 自动识别并跳过
+   gripper 维度，避免把正常开合误判为突变。
+6. S1 命中默认作为“异常帧/人工复核候选”，不会自动删除整条 episode。
+
+### S2 当前设计
+
+1. 先检查 State/Action 维度、layout 和物理表示是否可比；不兼容时明确标为
+   skipped，不进行错误比较。
+2. 绝对 action 直接平滑；delta action 先沿时间积分，再进行平滑。
+3. 对 State/Action 做一阶差分，在 `[-10, 10]` 帧内计算 cross-correlation，
+   取相关性最高的 lag。正 lag 表示 Action 领先 State。
+4. 对齐后仅在有效运动帧上计算 Directional Agreement：
+   State 与 Action 差分同号的比例。
+5. 默认至少需要 10 个有效运动样本，DA 阈值为 0.6。DA 低于 0.6，或最佳
+   lag 为负数（State 反而领先 Action），则命中 S2。
+6. S2 表示整条轨迹可能错配或反因果，因此建议 episode 级排除。
+
+注意：如果数据集的 Action 本身由下一帧 State 构造，S2 的 DA 会天然接近 1。
+此时 S2 能验证转换后的时序关系，但不是独立的传感器交叉验证。
+
+### S3 当前设计
+
+1. 在整个待筛选 split 上，分别统计 State/Action 每一维的 q01、q99。
+2. 默认 `alpha=1.5`，有效范围为：
+   `[q01-1.5(q99-q01), q99+1.5(q99-q01)]`。
+3. 任一非 gripper 维度超出范围，或出现 NaN/Inf，则标记对应帧。
+4. 为控制大型数据集内存，默认每类信号最多采样 1,000,000 行用于拟合阈值。
+5. gripper 维度根据 schema 自动识别并跳过；S3 命中默认作为异常帧候选。
+
+### 如何运行
+
+先进入仓库并激活已准备好的独立环境：
+
+```bash
+cd /data/wudi/InfiData-personal
+source /data/wudi/.venvs/infidata-quality/bin/activate
+```
+
+先运行算法测试：
+
+```bash
+python -m unittest -v tests/test_rlds_state_action_filter.py
+```
+
+完整筛选一个 RLDS split：
+
+```bash
+python scripts/quality/filter_rlds_state_action.py \
+  --dataset-dir /data/wudi/RLDS/realworld_piper_2/realworld_piper_infidata/1.0.0 \
+  --split train \
+  --output-dir quality_runs/realworld_piper_2_train
+```
+
+快速验证读取流程可增加 `--max-episodes 1`，但小样本拟合的 S1/S3 阈值不能作为
+最终筛选结论。完整结果包含：
+
+- `summary.json`：汇总与运行参数；
+- `episodes.jsonl`：每条 episode 的 S1/S2/S3 结论；
+- `flagged_frames.jsonl`：异常帧、维度、数值和阈值证据；
+- `s1_thresholds.json`、`s3_thresholds.json`：数据集级阈值；
+- `review/*.png`：供人工检查的 State/Action 曲线。
+
+当前 realworld_piper_2 的测试结果和人工复核记录位于：
+
+```text
+quality_runs/realworld_piper_2_train/
+```
+
+`quality_runs/` 已加入 `.gitignore`，结果保留在本机仓库目录中，但不会提交到 Git。
+全部标准 RLDS 的命令已经逐条列在：
+
+```text
+scripts/quality/run_all_rlds_state_action.sh
+```
+
+该文件没有变量、循环、条件判断或自动发现逻辑，只包含按数据集分组的 49 条完整
+Python 命令。可以复制单条命令执行，也可以顺序执行整个命令清单：
+
+```bash
+bash scripts/quality/run_all_rlds_state_action.sh
+```
+
+完整说明见 `docs/State-Action数据筛选使用说明.md`。全量数据约数十 TB，不建议并发运行。
+
+------
+
+## C1. Instruction Consistency
+
+### 视频内容与语言指令一致性
+
+### 含义
+
+该模块用于检查一条 demonstration 实际执行的行为，是否与它对应的语言指令一致。
+
+主要发现：
+
+- 语言指令描述的对象与视频中的对象不一致；
+- 指令要求执行某种操作，但视频执行的是另一种操作；
+- 多步骤任务中的动作顺序与指令不一致；
+- 指令与视频几乎无关；
+- 原始数据中的语言标注错误或过于模糊。
+
+### 核心逻辑
+
+Qwen-RobotManip 使用一个三阶段的 VLM 检查流程。
+
+#### 第一阶段：将长 episode 切分为 subtask segment
+
+长轨迹通常包含多个连续动作。直接让 VLM 判断完整长视频，容易因为信息过多而产生错误。
+
+因此，论文先把长 episode 拆分成多个 subtask-level segment，使每个视频片段只对应一个局部、时间上集中的动作单元。
+
+#### 第二阶段：结构化推理判断
+
+VLM 不能直接输出“匹配”或“不匹配”，而是需要先分析：
+
+- 被操作的物体；
+- 机器人实际执行的动作；
+- 动作的语义；
+- 动作的时间顺序；
+- 机器人与环境之间的交互结果。
+
+在完成这些中间分析后，再给出最终的一致性判断。
+
+这种方式能够减少 VLM 根据表面视觉特征进行简单猜测，并使判断结果更容易解释。
+
+#### 第三阶段：多模型交叉裁决
+
+如果第一个 VLM 将片段判断为：
+
+- 不一致；
+- 无法确定；
+- 语义模糊；
+
+则再交给多个不同的 VLM 独立评估，并通过跨模型投票确定最终结果。
+
+这样可以降低单个模型判断偏差带来的误筛风险。最终被判断为 Instruction-Video 不一致的数据会从训练数据中删除。
+
+------
+
+## C2. Video-State Consistency
+
+### 视频中的机器人状态与记录的 State 一致性
+
+### 含义
+
+该模块用于确认：
+
+> 视频里实际看到的机器人姿态，是否与数据中记录的 joint state 相匹配。
+
+它能够发现：
+
+- 视频与 State 来自不同时间；
+- 视频和 proprioception 数据配错；
+- State 时间戳发生偏移；
+- joint state 记录错误；
+- 相机参数错误；
+- 视频帧与机器人轨迹不属于同一条 episode。
+
+虽然该模块需要使用 joint state 和 URDF，但它与被删除的 S4 不同：
+
+- S4 比较 logged EEF 与 joint FK 的结果；
+- C2 比较视频中的机器人外观与 joint state 渲染出的机器人外观。
+
+因此，C2 不要求数据中存在 EEF，也不需要进行 Joint-EEF 对齐。
+
+### 核心逻辑
+
+论文的检查过程为：
+
+1. 根据机器人的 URDF 和当前记录的 joint state，计算机器人姿态；
+2. 使用相机参数，将机器人模型投影并渲染到视频图像平面；
+3. 使用经过微调的 SAM3，从真实视频中分割出机器人区域；
+4. 比较：
+   - URDF 渲染出的机器人 mask；
+   - SAM3 从视频中分割出的真实机器人 mask；
+5. 计算二者的重叠程度。
+
+如果两者高度重合，说明 joint state 与视频中的机器人姿态基本一致。
+
+如果重叠程度很低，则说明视频与 State 可能存在错位或错误，相应样本会被过滤。
+
+论文图 2 进一步说明，对于低 IoU 样本：
+
+- 如果低重叠是相机参数不准确造成的，则先优化相机参数；
+- 如果无法通过修正相机参数解决，则排除对应 episode。
+
+------
+
+## C3. Video Quality Filtering
+
+### 视频基础质量与冗余片段过滤
+
+### 含义
+
+该模块用于删除无法为策略学习提供可靠视觉信息的视频内容，包括：
+
+- Black Frames：黑帧；
+- Corrupted Frames：损坏或无法正常解码的帧；
+- Blur Frames：严重模糊帧；
+- Prolonged Static Segments：持续时间过长的静止片段。
+
+### 核心逻辑
+
+前三种问题主要是视觉内容本身无效：
+
+- 黑帧没有环境信息；
+- 损坏帧可能包含错误像素或解码异常；
+- 严重模糊帧无法准确识别物体和机器人状态。
+
+静止片段则需要联合视频与 State/Action 判断。
+
+如果一段视频长时间几乎没有视觉变化，同时：
+
+- State 几乎不变；
+- Action 也几乎不变；
+
+则这段数据通常是 episode 开始前或结束后的冗余等待时间，可以被过滤。
+
+但是，不能仅因为视觉变化很小就删除一段数据。论文明确提出，应保留具有任务意义的关键帧，例如：
+
+- Gripper closure；
+- 抓取发生的瞬间；
+- 视觉变化较小，但动作语义非常重要的状态转换。
+
+也就是说，C3 的逻辑不是简单地删除所有静止或低变化片段，而是：
+
+[
+\text{视觉上静止}
++
+\text{State/Action 也静止}
++
+\text{不是任务关键事件}
+\Rightarrow
+\text{过滤}
+]
+
+任务关键的细微动作需要显式保留。
+
+------
+
+## 最终复现流程概括
+
+### 第一部分：State-Action 信号过滤
+
+1. **S1：Sudden Change Detection**
+   检查轨迹是否存在突然跳变和离散尖峰。
+2. **S2：State-Action Trend Alignment**
+   检查 Action 是否正确领先或对应 State 的变化。
+3. **S3：Extreme Value Filtering**
+   检查 State/Action 是否存在严重偏离主体分布的极端值。
+
+### 第二部分：跨模态质量检查
+
+1. **C1：Instruction Consistency**
+   检查语言指令与视频中实际执行的任务是否一致。
+2. **C2：Video-State Consistency**
+   检查视频中的机器人姿态与记录的 joint state 是否一致。
+3. **C3：Video Quality Filtering**
+   过滤黑帧、坏帧、模糊帧和无意义的长时间静止片段。
