@@ -141,16 +141,20 @@ scripts/quality/filter_rlds_state_action.py
 1. 对每个 episode 的每个 State/Action 维度依次使用：
    - kernel=5 的 Median Filter；
    - window=9、polyorder=2 的 Savitzky–Golay Filter。
-2. 计算原始信号的 Residual、二阶差分 Acceleration 和三阶差分 Jerk。
+2. 计算原始信号的 Residual、中心二阶差分 Acceleration 和中心三阶差分 Jerk。
+   Acceleration 的首尾帧以及 Jerk 的前后两帧没有完整差分邻域，记为 NaN，
+   不参与阈值拟合和突变检测。
 3. 在整个待筛选 split 上按维度拟合基线：
    - 中心值使用 median；
    - 鲁棒尺度使用 `1.4826 × MAD`；
    - 为避免分段恒定信号的 MAD 退化为 0，最小尺度取
      `max(1e-6, 0.002 × (q99-q01))`。
-4. 默认异常阈值均为 8 个鲁棒尺度。只有
+4. 默认异常阈值均为单侧上限 `center + 8 × scale`，只检测异常大的指标，不把
+   低于中心的平滑帧视为异常。只有
    `Residual异常 AND (Acceleration异常 OR Jerk异常)` 才命中。
-5. NaN/Inf 直接视为异常。根据 `state_action_schema_json` 自动识别并跳过
-   gripper 维度，避免把正常开合误判为突变。
+5. NaN/Inf 直接视为异常。根据 `state_action_schema_json` 自动识别 gripper
+   维度并跳过其突变规则，避免把正常开合误判为突变；gripper 中的 NaN/Inf
+   仍然保留为异常。
 6. S1 命中默认作为“异常帧/人工复核候选”，不会自动删除整条 episode。
 
 ### S2 当前设计
@@ -158,25 +162,37 @@ scripts/quality/filter_rlds_state_action.py
 1. 先检查 State/Action 维度、layout 和物理表示是否可比；不兼容时明确标为
    skipped，不进行错误比较。
 2. 绝对 action 直接平滑；delta action 先沿时间积分，再进行平滑。
+   `action_is_delta` 仅严格接受布尔值或字符串 `"true"`/`"false"`。
+   根据当前项目原生 RLDS 均为 absolute source target 的约定，`"unknown"`、
+   缺失或非法值默认按 absolute 处理，同时在结果中保留默认推断来源。
 3. 对 State/Action 做一阶差分，在 `[-10, 10]` 帧内计算 cross-correlation，
    取相关性最高的 lag。正 lag 表示 Action 领先 State。
-4. 对齐后仅在有效运动帧上计算 Directional Agreement：
-   State 与 Action 差分同号的比例。
+4. 对齐后仅在有效运动帧上计算 Directional Agreement。对 State
+   和 Action 分别使用 epsilon-aware sign：绝对值不超过
+   `motion_epsilon=1e-5` 的差分视为静止 0，其余视为 -1 或 +1，
+   DA 为两侧方向值相同的比例。
 5. 默认至少需要 10 个有效运动样本，DA 阈值为 0.6。DA 低于 0.6，或最佳
    lag 为负数（State 反而领先 Action），则命中 S2。
-6. S2 表示整条轨迹可能错配或反因果，因此建议 episode 级排除。
+6. gripper 是离散、稀疏的阶跃信号，默认不参与连续 joint 轨迹的
+   correlation/DA 检查；state/action 任一侧标记为 gripper 的维度都会跳过。
+7. S2 表示整条轨迹可能错配或反因果，因此建议 episode 级排除。
 
 注意：如果数据集的 Action 本身由下一帧 State 构造，S2 的 DA 会天然接近 1。
 此时 S2 能验证转换后的时序关系，但不是独立的传感器交叉验证。
 
 ### S3 当前设计
 
-1. 在整个待筛选 split 上，分别统计 State/Action 每一维的 q01、q99。
+1. 在整个待筛选 split 上，先排除 NaN/Inf，再分别统计 State/Action
+   每一维的 q01、q99。同时记录每维有限样本数；完全没有有限值的维度标记为
+   `invalid_threshold_dimension`，不继续伪造数值阈值。
 2. 默认 `alpha=1.5`，有效范围为：
    `[q01-1.5(q99-q01), q99+1.5(q99-q01)]`。
-3. 任一非 gripper 维度超出范围，或出现 NaN/Inf，则标记对应帧。
+3. 任一非 gripper 维度超出范围，或任意维度（包括 gripper）出现
+   NaN/Inf，则标记对应帧。
 4. 为控制大型数据集内存，默认每类信号最多采样 1,000,000 行用于拟合阈值。
-5. gripper 维度根据 schema 自动识别并跳过；S3 命中默认作为异常帧候选。
+   抽样直接在整个 split 的全局行索引上等概率无放回执行，不会偏向后读取的 episode。
+5. gripper 维度根据 schema 自动识别并跳过数值极值检查，但不忽略非有限值；
+   S3 命中默认作为异常帧候选。
 
 ### 如何运行
 

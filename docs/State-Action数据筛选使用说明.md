@@ -14,11 +14,21 @@
 ## 实现约定
 
 1. S1 和 S3 先基于本次扫描的数据拟合数据集级阈值，再逐 episode 判断。
-2. S1 使用 MAD 鲁棒尺度，并以每维 q01-q99 范围的 0.2% 作为最小尺度，避免分段恒定信号的 MAD 退化为零。
-3. 从 `state_action_schema_json` 的 layout 自动识别 gripper。gripper 的正常开合是离散/双峰信号，S1 和 S3 默认不检查这些维度。
-4. S2 默认 DA 阈值为 0.6，搜索 ±10 帧延迟。负延迟表示 state 领先 action，按反因果风险标记。
-5. action 为 delta 时先积分。state/action layout 不同或物理语义不明确时，S2 会标为 skipped，不进行错误比较。
-6. S2 命中建议 episode 级排除；S1/S3 命中只建议复核或过滤相应帧。
+2. S1 使用 MAD 鲁棒尺度，并以每维 q01-q99 范围的 0.2% 作为最小尺度，按
+   `center + z_threshold × scale` 进行单侧上限检测。Acceleration 的首尾帧和
+   Jerk 的前后两帧没有完整中心差分邻域，不参与阈值拟合和检测。
+3. 从 `state_action_schema_json` 的 layout 自动识别 gripper。gripper 的正常开合是离散/双峰信号，
+   S1/S3 不对其执行突变或极值规则，但其中的 NaN/Inf 仍直接视为异常。
+4. S3 拟合前将所有 NaN/Inf 排除出分位数计算，记录每维有限样本数和无效阈值
+   维度。超过一百万行时，从整个 split 的全局行索引中等概率无放回抽样。
+5. S2 默认 DA 阈值为 0.6，搜索 ±10 帧延迟。计算方向时把绝对值不超过
+   `motion_epsilon=1e-5` 的差分视为静止；负延迟表示 state 领先 action，按反因果风险标记。
+   S2 默认跳过 state/action 任一侧标记为 gripper 的维度。
+6. action 为 delta 时先积分。state/action layout 不同或物理语义不明确时，S2 会标为 skipped，不进行错误比较。
+   `action_is_delta` 仅接受布尔值或字符串 `"true"`/`"false"`。根据当前项目
+   的原生 RLDS 均为 absolute source target 的约定，`"unknown"`、缺失或非法值
+   默认按 absolute 处理，并在输出中记录 `action_semantics_source=default_absolute`。
+7. S2 命中建议 episode 级排除；S1/S3 命中只建议复核或过滤相应帧。
 
 ## 环境
 
@@ -38,10 +48,11 @@ uv pip install --python /data/wudi/.venvs/infidata-quality/bin/python \
 
 ## 算法测试是什么
 
-`tests/test_rlds_state_action_filter.py` 是不读取真实 RLDS 的快速回归测试。它构造结果
+`scripts/quality/test_rlds_state_action_filter.py` 是不读取真实 RLDS 的快速回归测试。它构造结果
 已知的合成信号，检查：
 
-- S1 能命中人为注入的尖峰，并能跳过离散 gripper；
+- S1 能命中人为注入的尖峰，只检测异常大的指标，排除有限差分边界，并在跳过
+  gripper 正常开合的同时保留 NaN/Inf；
 - S2 能恢复已知的 3 帧 Action→State 延迟、识别反向趋势，并拒绝不兼容 layout；
 - S3 能命中极端值，同时不误筛 gripper。
 

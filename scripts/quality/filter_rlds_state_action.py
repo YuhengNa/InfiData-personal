@@ -99,7 +99,7 @@ def _robust_z(metric: np.ndarray, floor: float | np.ndarray) -> tuple[np.ndarray
     center = np.nanmedian(metric, axis=0)
     mad = np.nanmedian(np.abs(metric - center), axis=0)
     scale = np.maximum(1.4826 * mad, floor)
-    return np.abs(metric - center) / scale, center, scale
+    return (metric - center) / scale, center, scale
 
 
 def _s1_metrics(values: np.ndarray, cfg: S1Config) -> tuple[np.ndarray, dict[str, np.ndarray]]:
@@ -107,10 +107,16 @@ def _s1_metrics(values: np.ndarray, cfg: S1Config) -> tuple[np.ndarray, dict[str
     clean = _fill_nonfinite(raw)
     baseline = smooth(clean, cfg.median_kernel, cfg.savgol_window, cfg.savgol_polyorder)
     residual = np.abs(clean - baseline)
-    acceleration = np.abs(np.diff(clean, n=2, axis=0, prepend=clean[[0]], append=clean[[-1]]))
-    jerk = np.abs(np.diff(clean, n=3, axis=0, prepend=np.repeat(clean[[0]], 2, axis=0),
-                          append=clean[[-1]]))
-    jerk = jerk[: len(clean)]
+
+    acceleration = np.full_like(clean, np.nan)
+    if len(clean) >= 3:
+        acceleration[1:-1] = np.abs(clean[2:] - 2.0 * clean[1:-1] + clean[:-2])
+
+    jerk = np.full_like(clean, np.nan)
+    if len(clean) >= 5:
+        jerk[2:-2] = np.abs(
+            clean[4:] - 2.0 * clean[3:-1] + 2.0 * clean[1:-3] - clean[:-4]
+        ) / 2.0
     return baseline, {"residual": residual, "acceleration": acceleration, "jerk": jerk}
 
 
@@ -155,26 +161,38 @@ def detect_s1(values: np.ndarray, cfg: S1Config,
         computed: dict[str, Any] = {}
         for name, metric in metrics.items():
             z, center, scale = _robust_z(metric, floor)
-            computed[name] = {"z": z, "center": center, "scale": scale}
+            z_threshold = getattr(cfg, f"{name}_z")
+            computed[name] = {
+                "z": z,
+                "center": center,
+                "scale": scale,
+                "threshold": center + z_threshold * scale,
+            }
     else:
         computed = {}
         for name, metric in metrics.items():
             center = np.asarray(thresholds[name]["center"])
             scale = np.asarray(thresholds[name]["scale"])
             computed[name] = {
-                "z": np.abs(metric - center) / scale,
+                "z": (metric - center) / scale,
                 "center": center,
                 "scale": scale,
+                "threshold": np.asarray(thresholds[name]["threshold"]),
             }
     residual, acceleration, jerk = (metrics[name] for name in ("residual", "acceleration", "jerk"))
     rz, az, jz = (computed[name]["z"] for name in ("residual", "acceleration", "jerk"))
     rscale, ascale, jscale = (computed[name]["scale"] for name in ("residual", "acceleration", "jerk"))
-    mask = (rz >= cfg.residual_z) & ((az >= cfg.acceleration_z) | (jz >= cfg.jerk_z))
-    mask |= ~np.isfinite(raw)
+    rlimit, alimit, jlimit = (
+        computed[name]["threshold"] for name in ("residual", "acceleration", "jerk")
+    )
+    sudden_change_mask = (residual >= rlimit) & (
+        (acceleration >= alimit) | (jerk >= jlimit)
+    )
     ignored_dimensions = ignored_dimensions or set()
     for dim in ignored_dimensions:
-        if 0 <= dim < mask.shape[1]:
-            mask[:, dim] = False
+        if 0 <= dim < sudden_change_mask.shape[1]:
+            sudden_change_mask[:, dim] = False
+    mask = sudden_change_mask | ~np.isfinite(raw)
     frames, dims = np.nonzero(mask)
     hits = []
     for frame, dim in zip(frames.tolist(), dims.tolist()):
@@ -212,14 +230,26 @@ def _aligned(a: np.ndarray, s: np.ndarray, lag: int) -> tuple[np.ndarray, np.nda
     return a, s
 
 
+def _epsilon_sign(values: np.ndarray, epsilon: float) -> np.ndarray:
+    """Map values to {-1, 0, 1}, treating epsilon-scale motion as stationary."""
+    return np.where(values > epsilon, 1, np.where(values < -epsilon, -1, 0))
+
+
 def detect_s2(state: np.ndarray, action: np.ndarray, cfg: S2Config,
-              action_is_delta: bool = False) -> dict[str, Any]:
+              action_is_delta: bool = False,
+              ignored_dimensions: set[int] | None = None) -> dict[str, Any]:
     """Check trend alignment on dimensions with matching physical semantics."""
     state = np.asarray(state, dtype=np.float64)
     action = np.asarray(action, dtype=np.float64)
+    ignored_dimensions = ignored_dimensions or set()
     dims = min(state.shape[1], action.shape[1])
     if dims == 0 or len(state) < 4:
-        return {"flagged": False, "reason": "insufficient_data", "dimensions": []}
+        return {
+            "flagged": False,
+            "reason": "insufficient_data",
+            "ignored_dimensions": sorted(ignored_dimensions),
+            "dimensions": [],
+        }
     state = smooth(state[:, :dims])
     action = _fill_nonfinite(action[:, :dims])
     if action_is_delta:
@@ -229,6 +259,9 @@ def detect_s2(state: np.ndarray, action: np.ndarray, cfg: S2Config,
     ad = np.diff(action, axis=0)
     results = []
     for dim in range(dims):
+        if dim in ignored_dimensions:
+            results.append({"dim": dim, "evaluated": False, "reason": "ignored_dimension"})
+            continue
         best: dict[str, Any] | None = None
         for lag in range(-cfg.max_lag, cfg.max_lag + 1):
             aa, ss = _aligned(ad[:, dim], sd[:, dim], lag)
@@ -239,7 +272,9 @@ def detect_s2(state: np.ndarray, action: np.ndarray, cfg: S2Config,
             av, sv = aa[active], ss[active]
             astd, sstd = float(np.std(av)), float(np.std(sv))
             corr = float(np.corrcoef(av, sv)[0, 1]) if astd > 0 and sstd > 0 else -1.0
-            agreement = float(np.mean(np.sign(av) == np.sign(sv)))
+            a_sign = _epsilon_sign(av, cfg.motion_epsilon)
+            s_sign = _epsilon_sign(sv, cfg.motion_epsilon)
+            agreement = float(np.mean(a_sign == s_sign))
             candidate = {"lag": lag, "correlation": corr, "directional_agreement": agreement,
                          "active_samples": int(active.sum())}
             if best is None or (corr, agreement) > (best["correlation"], best["directional_agreement"]):
@@ -255,6 +290,7 @@ def detect_s2(state: np.ndarray, action: np.ndarray, cfg: S2Config,
     return {
         "flagged": any(item.get("flagged", False) for item in evaluated),
         "action_is_delta": action_is_delta,
+        "ignored_dimensions": sorted(ignored_dimensions),
         "evaluated_dimensions": len(evaluated),
         "dimensions": results,
     }
@@ -285,34 +321,82 @@ def s2_is_compatible(metadata: dict[str, Any], state_dim: int, action_dim: int) 
     return comparable, "matching_physical_representation" if comparable else "unknown_physical_semantics"
 
 
+def parse_action_is_delta(value: Any) -> bool | None:
+    """Parse explicit delta metadata without treating non-empty strings as true."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    return None
+
+
+def resolve_action_is_delta(value: Any) -> tuple[bool, str]:
+    """Resolve unknown delta metadata to this project's absolute-source default."""
+    parsed = parse_action_is_delta(value)
+    if parsed is None:
+        return False, "default_absolute"
+    return parsed, "metadata"
+
+
+def _uniform_sample_rows(episodes: list[Episode], signal: str, max_samples: int,
+                         rng: np.random.Generator) -> tuple[np.ndarray, int]:
+    """Sample signal rows uniformly over the full dataset without replacement."""
+    arrays = [
+        np.asarray(episode.state if signal == "state" else episode.action, dtype=np.float64)
+        for episode in episodes
+    ]
+    total_rows = sum(len(array) for array in arrays)
+    if total_rows <= max_samples:
+        return np.concatenate(arrays, axis=0), total_rows
+
+    selected = np.sort(rng.choice(total_rows, max_samples, replace=False))
+    chunks = []
+    offset = 0
+    for array in arrays:
+        end = offset + len(array)
+        left = np.searchsorted(selected, offset, side="left")
+        right = np.searchsorted(selected, end, side="left")
+        if right > left:
+            chunks.append(array[selected[left:right] - offset])
+        offset = end
+    return np.concatenate(chunks, axis=0), total_rows
+
+
 def fit_s3(episodes: Iterable[Episode], cfg: S3Config,
            state_grippers: set[int], action_grippers: set[int]) -> dict[str, Any]:
+    episodes = list(episodes)
     rng = np.random.default_rng(0)
-    buckets: dict[str, list[np.ndarray]] = {"state": [], "action": []}
-    totals = {"state": 0, "action": 0}
-    for episode in episodes:
-        for name, values in (("state", episode.state), ("action", episode.action)):
-            buckets[name].append(np.asarray(values, dtype=np.float64))
-            totals[name] += len(values)
-            if totals[name] >= cfg.max_samples * 2:
-                merged = np.concatenate(buckets[name], axis=0)
-                keep = rng.choice(len(merged), cfg.max_samples, replace=False)
-                buckets[name] = [merged[keep]]
-                totals[name] = cfg.max_samples
     output: dict[str, Any] = {}
-    for name, chunks in buckets.items():
-        values = np.concatenate(chunks, axis=0)
-        if len(values) > cfg.max_samples:
-            values = values[rng.choice(len(values), cfg.max_samples, replace=False)]
-        q01 = np.nanquantile(values, cfg.q_low, axis=0)
-        q99 = np.nanquantile(values, cfg.q_high, axis=0)
+    for name in ("state", "action"):
+        values, total_rows = _uniform_sample_rows(episodes, name, cfg.max_samples, rng)
+        finite_values = np.where(np.isfinite(values), values, np.nan)
+        finite_counts = np.isfinite(values).sum(axis=0)
+        q01 = np.full(values.shape[1], np.nan, dtype=np.float64)
+        q99 = np.full(values.shape[1], np.nan, dtype=np.float64)
+        has_finite = finite_counts > 0
+        if np.any(has_finite):
+            q01[has_finite] = np.nanquantile(
+                finite_values[:, has_finite], cfg.q_low, axis=0,
+            )
+            q99[has_finite] = np.nanquantile(
+                finite_values[:, has_finite], cfg.q_high, axis=0,
+            )
         span = q99 - q01
         lower, upper = q01 - cfg.alpha * span, q99 + cfg.alpha * span
+        invalid_dimensions = np.flatnonzero(~np.isfinite(lower) | ~np.isfinite(upper))
         grippers = state_grippers if name == "state" else action_grippers
         output[name] = {
             "q01": q01.tolist(), "q99": q99.tolist(),
             "lower": lower.tolist(), "upper": upper.tolist(),
-            "gripper_indices": sorted(grippers), "sample_rows": int(len(values)),
+            "gripper_indices": sorted(grippers),
+            "finite_counts": finite_counts.tolist(),
+            "invalid_threshold_dimensions": invalid_dimensions.tolist(),
+            "total_rows": int(total_rows),
+            "sample_rows": int(len(values)),
         }
     output["config"] = asdict(cfg)
     return output
@@ -321,16 +405,25 @@ def fit_s3(episodes: Iterable[Episode], cfg: S3Config,
 def detect_s3(values: np.ndarray, thresholds: dict[str, Any], grippers: set[int]) -> dict[str, Any]:
     raw = np.asarray(values, dtype=np.float64)
     lower, upper = np.asarray(thresholds["lower"]), np.asarray(thresholds["upper"])
-    mask = (raw < lower) | (raw > upper) | ~np.isfinite(raw)
+    extreme_mask = (raw < lower) | (raw > upper)
     for dim in grippers:
-        if 0 <= dim < mask.shape[1]:
-            mask[:, dim] = False
+        if 0 <= dim < extreme_mask.shape[1]:
+            extreme_mask[:, dim] = False
+    nonfinite_mask = ~np.isfinite(raw)
+    mask = extreme_mask | nonfinite_mask
     frames, dims = np.nonzero(mask)
     hits = [{
         "frame": frame, "dim": dim, "value": _json_number(raw[frame, dim]),
         "lower": float(lower[dim]), "upper": float(upper[dim]),
+        "reason": "nonfinite" if nonfinite_mask[frame, dim] else "extreme",
     } for frame, dim in zip(frames.tolist(), dims.tolist())]
-    return {"flagged": bool(hits), "frames": sorted(set(frames.tolist())), "hits": hits}
+    invalid_dimensions = np.flatnonzero(~np.isfinite(lower) | ~np.isfinite(upper))
+    return {
+        "flagged": bool(hits),
+        "frames": sorted(set(frames.tolist())),
+        "hits": hits,
+        "invalid_threshold_dimensions": invalid_dimensions.tolist(),
+    }
 
 
 def _json_number(value: float) -> float | str:
@@ -446,7 +539,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     with (output / "episodes.jsonl").open("w", encoding="utf-8") as episode_file, \
             frames_path.open("w", encoding="utf-8") as frame_file:
         for episode in episodes:
-            action_is_delta = bool(episode.metadata.get("action_is_delta", False))
+            raw_action_is_delta = episode.metadata.get("action_is_delta")
+            action_is_delta, action_semantics_source = resolve_action_is_delta(
+                raw_action_is_delta,
+            )
             s1s = detect_s1(
                 episode.state, s1cfg, s1_thresholds["state"], state_grippers,
             )
@@ -457,7 +553,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 episode.metadata, episode.state.shape[1], episode.action.shape[1],
             )
             if compatible:
-                s2 = detect_s2(episode.state, episode.action, s2cfg, action_is_delta)
+                s2 = detect_s2(
+                    episode.state,
+                    episode.action,
+                    s2cfg,
+                    action_is_delta=action_is_delta,
+                    ignored_dimensions=state_grippers | action_grippers,
+                )
                 s2["compatibility_reason"] = compatibility_reason
             else:
                 s2 = {
@@ -465,6 +567,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "compatibility_reason": compatibility_reason,
                     "dimensions": [],
                 }
+            s2["raw_action_is_delta"] = raw_action_is_delta
+            s2["action_semantics_source"] = action_semantics_source
             s3s = detect_s3(episode.state, s3["state"], state_grippers)
             s3a = detect_s3(episode.action, s3["action"], action_grippers)
             failed = []
