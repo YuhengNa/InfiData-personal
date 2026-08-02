@@ -10,9 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import pickle
+import re
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import numpy as np
 from scipy.ndimage import median_filter
@@ -103,6 +106,15 @@ def _robust_z(metric: np.ndarray, floor: float | np.ndarray) -> tuple[np.ndarray
     return (metric - center) / scale, center, scale
 
 
+def _robust_center_scale(metric: np.ndarray,
+                         floor: float | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Fit robust upper-tail parameters without allocating a full z-score array."""
+    metric = np.asarray(metric)
+    center = np.nanmedian(metric, axis=0)
+    mad = np.nanmedian(np.abs(metric - center), axis=0)
+    return center, np.maximum(1.4826 * mad, floor)
+
+
 def _s1_metrics(values: np.ndarray, cfg: S1Config) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     raw = np.asarray(values, dtype=np.float64)
     clean = _fill_nonfinite(raw)
@@ -135,11 +147,20 @@ def fit_s1(episodes: Iterable[Episode], cfg: S1Config, signal: str) -> dict[str,
         keep = np.random.default_rng(0).choice(len(values), cfg.max_samples, replace=False)
         values = values[keep]
         metrics = {name: metric[keep] for name, metric in metrics.items()}
+    return _fit_s1_sample(values, metrics, cfg, signal, total_rows=sum(
+        len(chunk) for chunk in values_chunks
+    ))
+
+
+def _fit_s1_sample(values: np.ndarray, metrics: dict[str, np.ndarray], cfg: S1Config,
+                   signal: str, total_rows: int) -> dict[str, Any]:
     signal_span = np.nanquantile(values, 0.99, axis=0) - np.nanquantile(values, 0.01, axis=0)
     floor = np.maximum(cfg.scale_floor, cfg.relative_scale_floor * signal_span)
-    result: dict[str, Any] = {"signal": signal, "sample_rows": len(values)}
+    result: dict[str, Any] = {
+        "signal": signal, "total_rows": int(total_rows), "sample_rows": len(values),
+    }
     for name, metric in metrics.items():
-        _, center, scale = _robust_z(metric, floor)
+        center, scale = _robust_center_scale(metric, floor)
         z_threshold = getattr(cfg, f"{name}_z")
         result[name] = {
             "center": center.tolist(),
@@ -374,33 +395,33 @@ def fit_s3(episodes: Iterable[Episode], cfg: S3Config,
     output: dict[str, Any] = {}
     for name in ("state", "action"):
         values, total_rows = _uniform_sample_rows(episodes, name, cfg.max_samples, rng)
-        finite_values = np.where(np.isfinite(values), values, np.nan)
-        finite_counts = np.isfinite(values).sum(axis=0)
-        q01 = np.full(values.shape[1], np.nan, dtype=np.float64)
-        q99 = np.full(values.shape[1], np.nan, dtype=np.float64)
-        has_finite = finite_counts > 0
-        if np.any(has_finite):
-            q01[has_finite] = np.nanquantile(
-                finite_values[:, has_finite], cfg.q_low, axis=0,
-            )
-            q99[has_finite] = np.nanquantile(
-                finite_values[:, has_finite], cfg.q_high, axis=0,
-            )
-        span = q99 - q01
-        lower, upper = q01 - cfg.alpha * span, q99 + cfg.alpha * span
-        invalid_dimensions = np.flatnonzero(~np.isfinite(lower) | ~np.isfinite(upper))
         grippers = state_grippers if name == "state" else action_grippers
-        output[name] = {
-            "q01": q01.tolist(), "q99": q99.tolist(),
-            "lower": lower.tolist(), "upper": upper.tolist(),
-            "gripper_indices": sorted(grippers),
-            "finite_counts": finite_counts.tolist(),
-            "invalid_threshold_dimensions": invalid_dimensions.tolist(),
-            "total_rows": int(total_rows),
-            "sample_rows": int(len(values)),
-        }
+        output[name] = _fit_s3_sample(values, total_rows, cfg, grippers)
     output["config"] = asdict(cfg)
     return output
+
+
+def _fit_s3_sample(values: np.ndarray, total_rows: int, cfg: S3Config,
+                   grippers: set[int]) -> dict[str, Any]:
+    finite_values = np.where(np.isfinite(values), values, np.nan)
+    finite_counts = np.isfinite(values).sum(axis=0)
+    q01 = np.full(values.shape[1], np.nan, dtype=np.float64)
+    q99 = np.full(values.shape[1], np.nan, dtype=np.float64)
+    has_finite = finite_counts > 0
+    if np.any(has_finite):
+        q01[has_finite] = np.nanquantile(finite_values[:, has_finite], cfg.q_low, axis=0)
+        q99[has_finite] = np.nanquantile(finite_values[:, has_finite], cfg.q_high, axis=0)
+    span = q99 - q01
+    lower, upper = q01 - cfg.alpha * span, q99 + cfg.alpha * span
+    invalid_dimensions = np.flatnonzero(~np.isfinite(lower) | ~np.isfinite(upper))
+    return {
+        "q01": q01.tolist(), "q99": q99.tolist(),
+        "lower": lower.tolist(), "upper": upper.tolist(),
+        "gripper_indices": sorted(grippers),
+        "finite_counts": finite_counts.tolist(),
+        "invalid_threshold_dimensions": invalid_dimensions.tolist(),
+        "total_rows": int(total_rows), "sample_rows": int(len(values)),
+    }
 
 
 def detect_s3(values: np.ndarray, thresholds: dict[str, Any], grippers: set[int]) -> dict[str, Any]:
@@ -427,6 +448,89 @@ def detect_s3(values: np.ndarray, thresholds: dict[str, Any], grippers: set[int]
     }
 
 
+class _PriorityReservoir:
+    """Exact uniform row sample with fixed retained memory.
+
+    Each input row receives an independent random priority. Keeping the rows
+    with the smallest priorities is equivalent to uniform sampling without
+    replacement over the complete stream.
+    """
+
+    def __init__(self, capacity: int, columns: int, seed: int = 0):
+        if capacity < 1:
+            raise ValueError("calibration sample capacity must be positive")
+        self.capacity = capacity
+        self.columns = columns
+        self._values = np.empty((capacity, columns), dtype=np.float32)
+        self._priorities = np.empty(capacity, dtype=np.float64)
+        self._size = 0
+        self._rng = np.random.default_rng(seed)
+
+    def update(self, values: np.ndarray) -> None:
+        values = np.asarray(values, dtype=np.float32)
+        if values.ndim != 2 or values.shape[1] != self.columns:
+            raise ValueError(f"expected calibration rows [N, {self.columns}], got {values.shape}")
+        if not len(values):
+            return
+        priorities = self._rng.random(len(values))
+        offset = 0
+        if self._size < self.capacity:
+            count = min(self.capacity - self._size, len(values))
+            end = self._size + count
+            self._values[self._size:end] = values[:count]
+            self._priorities[self._size:end] = priorities[:count]
+            self._size = end
+            offset = count
+        if offset == len(values):
+            return
+
+        priorities = priorities[offset:]
+        values = values[offset:]
+        candidate_rows = np.flatnonzero(priorities < self._priorities.max())
+        if not len(candidate_rows):
+            return
+        candidate_priorities = priorities[candidate_rows]
+        pool = np.concatenate((self._priorities, candidate_priorities))
+        keep = np.argpartition(pool, self.capacity - 1)[:self.capacity]
+        old_keep = keep[keep < self.capacity]
+        new_keep = keep[keep >= self.capacity] - self.capacity
+        retained = np.zeros(self.capacity, dtype=bool)
+        retained[old_keep] = True
+        replace = np.flatnonzero(~retained)
+        self._values[replace] = values[candidate_rows[new_keep]]
+        self._priorities[replace] = candidate_priorities[new_keep]
+
+    @property
+    def sample(self) -> np.ndarray:
+        return self._values[:self._size]
+
+
+def _calibration_bundle(episode: Episode, cfg: S1Config) -> np.ndarray:
+    chunks = []
+    for values in (episode.state, episode.action):
+        raw = np.asarray(values, dtype=np.float64)
+        clean = _fill_nonfinite(raw)
+        _, metrics = _s1_metrics(raw, cfg)
+        chunks.extend((clean, raw, metrics["residual"], metrics["acceleration"], metrics["jerk"]))
+    return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
+
+
+def _signal_sample(sample: np.ndarray, offset: int, dimensions: int
+                   ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    blocks = [sample[:, offset + index * dimensions:offset + (index + 1) * dimensions]
+              for index in range(5)]
+    return blocks[0], blocks[1], {
+        "residual": blocks[2], "acceleration": blocks[3], "jerk": blocks[4],
+    }
+
+
+def _sample_rows(values: np.ndarray, rows: int, seed: int) -> np.ndarray:
+    if len(values) <= rows:
+        return values
+    keep = np.random.default_rng(seed).choice(len(values), rows, replace=False)
+    return values[keep]
+
+
 def _json_number(value: float) -> float | str:
     return float(value) if math.isfinite(float(value)) else str(float(value))
 
@@ -447,37 +551,238 @@ def _decode(value: Any) -> Any:
     return value
 
 
-def load_rlds(dataset_dir: Path, split: str, max_episodes: int | None) -> list[Episode]:
+def iter_rlds(dataset_dir: Path, split: str, max_episodes: int | None,
+              desc: str = "Reading RLDS") -> Iterator[Episode]:
+    """Read only state/action/metadata fields from TFRecords, never camera tensors."""
+    import tensorflow as tf
     import tensorflow_datasets as tfds
 
     builder = tfds.builder_from_directory(str(dataset_dir))
-    cameras = list(builder.info.features["steps"].feature["observation"]["images"].keys())
-    decoders = {"steps": {"observation": {"images": {
-        camera: tfds.decode.SkipDecoding() for camera in cameras
-    }}}}
-    dataset = builder.as_dataset(split=split, decoders=decoders)
-    total = builder.info.splits[split].num_examples
+    if split not in builder.info.splits:
+        raise ValueError(f"Unknown split {split!r}; available: {list(builder.info.splits)}")
+    if str(builder.info.file_format).lower() not in {"fileformat.tfrecord", "tfrecord"}:
+        raise ValueError(f"Only TFRecord-backed RLDS is supported, got {builder.info.file_format}")
+
+    serialized = builder.info.features.get_serialized_info()
+    selected = {
+        "episode_metadata": serialized["episode_metadata"],
+        "steps": {
+            "observation": {"state": serialized["steps"]["observation"]["state"]},
+            "action": serialized["steps"]["action"],
+        },
+    }
+    parser = tfds.core.example_parser.ExampleParser(selected)
+    split_info = builder.info.splits[split]
+    files = [str(Path(str(builder.data_dir)) / name) for name in split_info.filenames]
+    dataset = tf.data.TFRecordDataset(
+        files, num_parallel_reads=1, buffer_size=1024 * 1024,
+    ).map(parser.parse_example, num_parallel_calls=1, deterministic=True)
+    total = split_info.num_examples
     if max_episodes is not None:
         dataset = dataset.take(max_episodes)
         total = min(total, max_episodes)
-    episodes = []
-    progress = tqdm(dataset, total=total, desc=f"Loading {split}", unit="episode")
+    progress = tqdm(dataset, total=total, desc=desc, unit="episode")
     for ordinal, raw in enumerate(progress):
         metadata = _decode(raw["episode_metadata"])
-        states, actions = [], []
-        for step in raw["steps"].as_numpy_iterator():
-            states.append(step["observation"]["state"])
-            actions.append(step["action"])
+        state = raw["steps"]["observation"]["state"].numpy()
+        action = raw["steps"]["action"].numpy()
         key = str(metadata.get("source_episode_index", metadata.get("episode_index", ordinal)))
-        episodes.append(Episode(key, np.asarray(states), np.asarray(actions), metadata))
-    return episodes
+        yield Episode(key, state, action, metadata)
 
 
-def _parse_indices(raw: str, metadata: dict[str, Any], layout_key: str) -> set[int]:
+def _iter_episode_cache(path: Path, total: int) -> Iterator[Episode]:
+    with path.open("rb") as cache_file:
+        progress = tqdm(total=total, desc="Screening cached episodes", unit="episode")
+        try:
+            while True:
+                try:
+                    episode = pickle.load(cache_file)
+                except EOFError:
+                    break
+                yield episode
+                progress.update(1)
+        finally:
+            progress.close()
+
+
+_GROUPED_DIMENSION = re.compile(r"^(.*?)(?:\[(\d+)\]|:(\d+))\s*$")
+
+
+def _json_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        decoded = json.loads(value) if value else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _json_sequence(value: Any) -> list[Any]:
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    try:
+        decoded = json.loads(value) if value else []
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return decoded if isinstance(decoded, list) else []
+
+
+def _dimension_sources(metadata: dict[str, Any], signal: str) -> list[tuple[str, Any, bool]]:
+    """Return ordered (source, entries, allow_prefix) dimension descriptions."""
+    schema = _state_action_schema(metadata)
+    sources: list[tuple[str, Any, bool]] = [
+        (f"state_action_schema_json.{signal}_layout", schema.get(f"{signal}_layout"), False),
+        (f"state_action_schema_json.{signal}_dims", schema.get(f"{signal}_dims"), False),
+        (f"state_action_schema_json.{signal}_feature.names",
+         _json_mapping(schema.get(f"{signal}_feature")).get("names"), True),
+    ]
+
+    top_fields = _json_sequence(metadata.get(f"{signal}_fields_json"))
+    top_dims = _json_sequence(metadata.get(f"{signal}_dims_json"))
+    if top_fields and len(top_fields) == len(top_dims) and all(
+        isinstance(width, (int, np.integer)) for width in top_dims
+    ):
+        top_dims = [f"{name}:{int(width)}" for name, width in zip(top_fields, top_dims)]
+    sources.append((f"{signal}_dims_json", top_dims, False))
+
+    original = _json_mapping(metadata.get("original_feature_schema_json"))
+    sources.append(
+        (f"original_feature_schema_json.{signal}_feature.names",
+         _json_mapping(original.get(f"{signal}_feature")).get("names"), True),
+    )
+
+    robots = _json_mapping(metadata.get("robots_json"))
+    keys = [metadata.get("robot_schema_key"), schema.get("schema_key")]
+    robot: dict[str, Any] = {}
+    for key in keys:
+        if key in robots and isinstance(robots[key], dict):
+            robot = robots[key]
+            break
+    if not robot and len(robots) == 1:
+        only = next(iter(robots.values()))
+        robot = only if isinstance(only, dict) else {}
+    robot_schema = _json_mapping(robot.get("state_action_schema"))
+    sources.extend([
+        (f"robots_json.state_action_schema.{signal}_layout",
+         robot_schema.get(f"{signal}_layout"), False),
+        (f"robots_json.state_action_schema.{signal}_dims",
+         robot_schema.get(f"{signal}_dims"), False),
+        (f"robots_json.state_action_schema.{signal}_feature.names",
+         _json_mapping(robot_schema.get(f"{signal}_feature")).get("names"), True),
+    ])
+    return sources
+
+
+def _expand_dimension_entries(entries: Any, dimension: int,
+                              allow_prefix: bool) -> tuple[list[tuple[str, int, int]], str] | None:
+    """Expand dimension descriptions into (name, start, width) blocks."""
+    if isinstance(entries, dict):
+        entries = [f"{name}:{width}" for name, width in entries.items()]
+    if not isinstance(entries, (list, tuple)) or not entries:
+        return None
+
+    # A list with one name per physical dimension is already expanded. Brackets
+    # in such names are indices, not block widths.
+    if len(entries) == dimension and all(isinstance(item, str) for item in entries):
+        return [(str(name), index, 1) for index, name in enumerate(entries)], "complete"
+
+    if allow_prefix and len(entries) <= dimension and all(isinstance(item, str) for item in entries):
+        status = "complete" if len(entries) == dimension else "partial"
+        return [(str(name), index, 1) for index, name in enumerate(entries)], status
+
+    blocks: list[tuple[str, int, int]] = []
+    offset = 0
+    for entry in entries:
+        if not isinstance(entry, str):
+            return None
+        match = _GROUPED_DIMENSION.fullmatch(entry.strip())
+        if match:
+            name = match.group(1).strip()
+            width = int(match.group(2) or match.group(3))
+        else:
+            name, width = entry.strip(), 1
+        if not name or width < 1:
+            return None
+        blocks.append((name, offset, width))
+        offset += width
+    return (blocks, "complete") if offset == dimension else None
+
+
+def _is_gripper_block(name: str, width: int) -> bool:
+    normalized = name.strip().lower()
+    tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    if "gripper" in tokens:
+        return True
+    # AgiBot stores one scalar position per end effector under this exact field.
+    # Generic EEF/hand pose fields are deliberately not classified as grippers.
+    return normalized.endswith("/effector/position") and width <= 2
+
+
+def resolve_gripper_indices(raw: str, metadata: dict[str, Any], signal: str,
+                            dimension: int) -> tuple[set[int], dict[str, Any]]:
+    """Resolve gripper dimensions and retain provenance for auditability."""
+    if signal not in {"state", "action"}:
+        raise ValueError(f"Unknown signal {signal!r}")
     if raw.strip().lower() != "auto":
-        return {int(item) for item in raw.split(",") if item.strip()} if raw.strip() else set()
-    layout = _state_action_schema(metadata).get(layout_key, [])
-    return {index for index, name in enumerate(layout) if "gripper" in str(name).lower()}
+        try:
+            indices = {int(item) for item in raw.split(",") if item.strip()}
+        except ValueError as exc:
+            raise ValueError(f"Invalid --{signal}-gripper-indices value: {raw!r}") from exc
+        invalid = sorted(index for index in indices if not 0 <= index < dimension)
+        if invalid:
+            raise ValueError(
+                f"{signal} gripper indices {invalid} are outside dimension {dimension}"
+            )
+        return indices, {
+            "status": "explicit", "source": "command_line", "indices": sorted(indices),
+            "dimension": dimension,
+        }
+
+    valid: list[tuple[set[int], dict[str, Any]]] = []
+    for source, entries, allow_prefix in _dimension_sources(metadata, signal):
+        expanded = _expand_dimension_entries(entries, dimension, allow_prefix)
+        if expanded is None:
+            continue
+        blocks, coverage = expanded
+        indices = {
+            index
+            for name, start, width in blocks
+            if _is_gripper_block(name, width)
+            for index in range(start, start + width)
+        }
+        valid.append((indices, {
+            "status": "resolved" if coverage == "complete" else "partial",
+            "source": source,
+            "coverage": coverage,
+            "indices": sorted(indices),
+            "dimension": dimension,
+        }))
+
+    # Prefer an explicit gripper-bearing schema over a higher-priority but less
+    # informative layout. Otherwise the first dimensionally valid source wins.
+    for indices, resolution in valid:
+        if indices:
+            return indices, resolution
+    if valid:
+        return valid[0]
+    return set(), {
+        "status": "unresolved", "source": None, "coverage": "none",
+        "indices": [], "dimension": dimension,
+    }
+
+
+def _parse_indices(raw: str, metadata: dict[str, Any], layout_key: str,
+                   dimension: int | None = None) -> set[int]:
+    """Compatibility wrapper for callers that only need the resolved set."""
+    signal = layout_key.removesuffix("_layout")
+    if dimension is None:
+        schema = _state_action_schema(metadata)
+        dimension = int(schema.get(f"{signal}_dim", 0))
+        if not dimension:
+            layout = schema.get(layout_key, [])
+            dimension = len(layout) if isinstance(layout, list) else 0
+    return resolve_gripper_indices(raw, metadata, signal, dimension)[0]
 
 
 def _plot_review(episode: Episode, report: dict[str, Any], output: Path) -> None:
@@ -508,119 +813,244 @@ def _plot_review(episode: Episode, report: dict[str, Any], output: Path) -> None
     plt.close(fig)
 
 
+def _fit_sampled_thresholds(sample: np.ndarray, total_rows: int, state_dim: int,
+                            action_dim: int, s1cfg: S1Config, s3cfg: S3Config,
+                            state_grippers: set[int], action_grippers: set[int]
+                            ) -> tuple[dict[str, Any], dict[str, Any]]:
+    offsets = {"state": (0, state_dim), "action": (5 * state_dim, action_dim)}
+    s1_rows = _sample_rows(sample, s1cfg.max_samples, seed=1)
+    s1_thresholds = {}
+    for signal, (offset, dimensions) in offsets.items():
+        clean, _, metrics = _signal_sample(s1_rows, offset, dimensions)
+        s1_thresholds[signal] = _fit_s1_sample(
+            clean, metrics, s1cfg, signal, total_rows,
+        )
+
+    s3_rows = _sample_rows(sample, s3cfg.max_samples, seed=2)
+    s3: dict[str, Any] = {}
+    for signal, (offset, dimensions) in offsets.items():
+        _, raw, _ = _signal_sample(s3_rows, offset, dimensions)
+        grippers = state_grippers if signal == "state" else action_grippers
+        s3[signal] = _fit_s3_sample(raw, total_rows, s3cfg, grippers)
+    s3["config"] = asdict(s3cfg)
+    return s1_thresholds, s3
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     output = args.output_dir
     output.mkdir(parents=True, exist_ok=True)
-    episodes = load_rlds(args.dataset_dir, args.split, args.max_episodes)
-    if not episodes:
-        raise RuntimeError(f"No episodes found in split {args.split!r}")
-    state_grippers = _parse_indices(
-        args.state_gripper_indices, episodes[0].metadata, "state_layout",
-    )
-    action_grippers = _parse_indices(
-        args.action_gripper_indices, episodes[0].metadata, "action_layout",
-    )
     s1cfg = S1Config(residual_z=args.s1_residual_z, acceleration_z=args.s1_acceleration_z,
-                     jerk_z=args.s1_jerk_z, relative_scale_floor=args.s1_relative_scale_floor)
+                     jerk_z=args.s1_jerk_z, relative_scale_floor=args.s1_relative_scale_floor,
+                     max_samples=args.s1_max_samples)
     s2cfg = S2Config(da_threshold=args.s2_da_threshold, max_lag=args.s2_max_lag,
                      min_active=args.s2_min_active, flag_negative_lag=not args.s2_allow_negative_lag)
     s3cfg = S3Config(alpha=args.s3_alpha, max_samples=args.s3_max_samples)
-    s1_thresholds = {
-        "state": fit_s1(episodes, s1cfg, "state"),
-        "action": fit_s1(episodes, s1cfg, "action"),
-    }
-    (output / "s1_thresholds.json").write_text(
-        json.dumps(s1_thresholds, indent=2), encoding="utf-8",
-    )
-    s3 = fit_s3(episodes, s3cfg, state_grippers, action_grippers)
-    (output / "s3_thresholds.json").write_text(json.dumps(s3, indent=2), encoding="utf-8")
+    if args.calibration_memory_mb < 1:
+        raise ValueError("--calibration-memory-mb must be positive")
+    if s1cfg.max_samples < 1 or s3cfg.max_samples < 1:
+        raise ValueError("--s1-max-samples and --s3-max-samples must be positive")
+
+    cache_path = output / ".state_action_episodes.pkl"
+    partial_cache = output / ".state_action_episodes.pkl.partial"
+    cache_path.unlink(missing_ok=True)
+    partial_cache.unlink(missing_ok=True)
+    reservoir: _PriorityReservoir | None = None
+    first_metadata: dict[str, Any] | None = None
+    state_resolution: dict[str, Any] | None = None
+    action_resolution: dict[str, Any] | None = None
+    state_grippers: set[int] = set()
+    action_grippers: set[int] = set()
+    state_dim = action_dim = total_rows = episodes_scanned = 0
+    requested_rows = max(s1cfg.max_samples, s3cfg.max_samples)
+    capacity_rows = capacity_bytes = 0
+    try:
+        with partial_cache.open("wb") as cache_file:
+            for episode in iter_rlds(
+                args.dataset_dir, args.split, args.max_episodes, desc=f"Calibrating {args.split}",
+            ):
+                if episode.state.ndim != 2 or episode.action.ndim != 2:
+                    raise ValueError(
+                        f"episode {episode.key}: state/action must be rank 2, got "
+                        f"{episode.state.shape} and {episode.action.shape}"
+                    )
+                if len(episode.state) != len(episode.action):
+                    raise ValueError(
+                        f"episode {episode.key}: state/action frame counts differ: "
+                        f"{len(episode.state)} != {len(episode.action)}"
+                    )
+                if reservoir is None:
+                    first_metadata = episode.metadata
+                    state_dim, action_dim = episode.state.shape[1], episode.action.shape[1]
+                    state_grippers, state_resolution = resolve_gripper_indices(
+                        args.state_gripper_indices, first_metadata, "state", state_dim,
+                    )
+                    action_grippers, action_resolution = resolve_gripper_indices(
+                        args.action_gripper_indices, first_metadata, "action", action_dim,
+                    )
+                    print(
+                        "Gripper resolution: "
+                        f"state={sorted(state_grippers)} ({state_resolution['source']}), "
+                        f"action={sorted(action_grippers)} ({action_resolution['source']})",
+                        file=sys.stderr,
+                    )
+                    unresolved = [
+                        signal for signal, resolution in (
+                            ("state", state_resolution), ("action", action_resolution),
+                        ) if resolution["status"] == "unresolved"
+                    ]
+                    if unresolved and not args.allow_unresolved_gripper:
+                        options = " ".join(
+                            f'--{signal}-gripper-indices ""' for signal in unresolved
+                        )
+                        raise ValueError(
+                            "Could not resolve gripper dimensions for "
+                            f"{', '.join(unresolved)}. Specify comma-separated indices, or "
+                            f"explicitly confirm no gripper with: {options}. "
+                            "Use --allow-unresolved-gripper only for exploratory runs."
+                        )
+                    for signal, resolution in (
+                        ("state", state_resolution), ("action", action_resolution),
+                    ):
+                        if resolution["status"] in {"unresolved", "partial"}:
+                            print(
+                                f"WARNING: {signal} gripper resolution is "
+                                f"{resolution['status']}; use --{signal}-gripper-indices "
+                                "to specify it explicitly if needed.",
+                                file=sys.stderr,
+                            )
+                    columns = 5 * (state_dim + action_dim)
+                    bytes_per_row = columns * np.dtype(np.float32).itemsize + 8
+                    budget = args.calibration_memory_mb * 1024 * 1024
+                    capacity = min(requested_rows, budget // bytes_per_row)
+                    reservoir = _PriorityReservoir(int(capacity), columns)
+                    capacity_rows = int(capacity)
+                    capacity_bytes = int(capacity * bytes_per_row)
+                elif (episode.state.shape[1], episode.action.shape[1]) != (state_dim, action_dim):
+                    raise ValueError(
+                        f"episode {episode.key}: dimensions changed from "
+                        f"({state_dim}, {action_dim}) to "
+                        f"({episode.state.shape[1]}, {episode.action.shape[1]})"
+                    )
+                reservoir.update(_calibration_bundle(episode, s1cfg))
+                pickle.dump(episode, cache_file, protocol=pickle.HIGHEST_PROTOCOL)
+                total_rows += len(episode.state)
+                episodes_scanned += 1
+        if reservoir is None or first_metadata is None:
+            raise RuntimeError(f"No episodes found in split {args.split!r}")
+        partial_cache.replace(cache_path)
+    except BaseException:
+        partial_cache.unlink(missing_ok=True)
+        raise
+
+    try:
+        assert state_resolution is not None and action_resolution is not None
+        s1_thresholds, s3 = _fit_sampled_thresholds(
+            reservoir.sample, total_rows, state_dim, action_dim, s1cfg, s3cfg,
+            state_grippers, action_grippers,
+        )
+        (output / "s1_thresholds.json").write_text(
+            json.dumps(s1_thresholds, indent=2), encoding="utf-8",
+        )
+        (output / "s3_thresholds.json").write_text(
+            json.dumps(s3, indent=2), encoding="utf-8",
+        )
+        retained_rows = len(reservoir.sample)
+        del reservoir
+    except BaseException:
+        cache_path.unlink(missing_ok=True)
+        raise
 
     counts = {"S1": 0, "S2": 0, "S3": 0, "flagged_any": 0}
-    reports = []
     frames_path = output / "flagged_frames.jsonl"
-    with (output / "episodes.jsonl").open("w", encoding="utf-8") as episode_file, \
-            frames_path.open("w", encoding="utf-8") as frame_file:
-        for episode in tqdm(episodes, desc="Screening episodes", unit="episode"):
-            raw_action_is_delta = episode.metadata.get("action_is_delta")
-            action_is_delta, action_semantics_source = resolve_action_is_delta(
-                raw_action_is_delta,
-            )
-            s1s = detect_s1(
-                episode.state, s1cfg, s1_thresholds["state"], state_grippers,
-            )
-            s1a = detect_s1(
-                episode.action, s1cfg, s1_thresholds["action"], action_grippers,
-            )
-            compatible, compatibility_reason = s2_is_compatible(
-                episode.metadata, episode.state.shape[1], episode.action.shape[1],
-            )
-            if compatible:
-                s2 = detect_s2(
-                    episode.state,
-                    episode.action,
-                    s2cfg,
-                    action_is_delta=action_is_delta,
-                    ignored_dimensions=state_grippers | action_grippers,
-                )
-                s2["compatibility_reason"] = compatibility_reason
-            else:
-                s2 = {
-                    "flagged": False, "skipped": True,
-                    "compatibility_reason": compatibility_reason,
-                    "dimensions": [],
-                }
-            s2["raw_action_is_delta"] = raw_action_is_delta
-            s2["action_semantics_source"] = action_semantics_source
-            s3s = detect_s3(episode.state, s3["state"], state_grippers)
-            s3a = detect_s3(episode.action, s3["action"], action_grippers)
-            failed = []
-            if s1s["flagged"] or s1a["flagged"]: failed.append("S1")
-            if s2["flagged"]: failed.append("S2")
-            if s3s["flagged"] or s3a["flagged"]: failed.append("S3")
-            if "S2" in failed:
-                recommended_action = "drop_episode"
-            elif failed:
-                recommended_action = "review_or_filter_frames"
-            else:
-                recommended_action = "keep"
-            report = {
-                "episode": episode.key, "num_frames": len(episode.state),
-                "failed_rules": failed,
-                "review_required": bool(failed),
-                "recommended_action": recommended_action,
-                "metadata": episode.metadata,
-                "s1_state": s1s, "s1_action": s1a, "s2": s2,
-                "s3_state": s3s, "s3_action": s3a,
-            }
-            for rule in failed: counts[rule] += 1
-            counts["flagged_any"] += int(bool(failed))
-            episode_file.write(json.dumps(report, ensure_ascii=False) + "\n")
-            for rule, signal, result in (
-                ("S1", "state", s1s), ("S1", "action", s1a),
-                ("S3", "state", s3s), ("S3", "action", s3a),
-            ):
-                for hit in result["hits"]:
-                    frame_file.write(json.dumps({"episode": episode.key, "rule": rule,
-                                                 "signal": signal, **hit}) + "\n")
-            reports.append(report)
-
     review_dir = output / "review"
     review_dir.mkdir(exist_ok=True)
     for stale_plot in review_dir.glob("episode_*.png"):
         stale_plot.unlink()
     plotted = 0
-    for episode, report in zip(episodes, reports):
-        if report["failed_rules"] and plotted < args.review_plots:
-            _plot_review(episode, report, review_dir / f"episode_{episode.key}.png")
-            plotted += 1
+    try:
+        with (output / "episodes.jsonl").open("w", encoding="utf-8") as episode_file, \
+                frames_path.open("w", encoding="utf-8") as frame_file:
+            for episode in _iter_episode_cache(cache_path, episodes_scanned):
+                raw_action_is_delta = episode.metadata.get("action_is_delta")
+                action_is_delta, action_semantics_source = resolve_action_is_delta(
+                    raw_action_is_delta,
+                )
+                s1s = detect_s1(
+                    episode.state, s1cfg, s1_thresholds["state"], state_grippers,
+                )
+                s1a = detect_s1(
+                    episode.action, s1cfg, s1_thresholds["action"], action_grippers,
+                )
+                compatible, compatibility_reason = s2_is_compatible(
+                    episode.metadata, episode.state.shape[1], episode.action.shape[1],
+                )
+                if compatible:
+                    s2 = detect_s2(
+                        episode.state, episode.action, s2cfg,
+                        action_is_delta=action_is_delta,
+                        ignored_dimensions=state_grippers | action_grippers,
+                    )
+                    s2["compatibility_reason"] = compatibility_reason
+                else:
+                    s2 = {
+                        "flagged": False, "skipped": True,
+                        "compatibility_reason": compatibility_reason, "dimensions": [],
+                    }
+                s2["raw_action_is_delta"] = raw_action_is_delta
+                s2["action_semantics_source"] = action_semantics_source
+                s3s = detect_s3(episode.state, s3["state"], state_grippers)
+                s3a = detect_s3(episode.action, s3["action"], action_grippers)
+                failed = []
+                if s1s["flagged"] or s1a["flagged"]: failed.append("S1")
+                if s2["flagged"]: failed.append("S2")
+                if s3s["flagged"] or s3a["flagged"]: failed.append("S3")
+                recommended_action = (
+                    "drop_episode" if "S2" in failed else
+                    "review_or_filter_frames" if failed else "keep"
+                )
+                report = {
+                    "episode": episode.key, "num_frames": len(episode.state),
+                    "failed_rules": failed, "review_required": bool(failed),
+                    "recommended_action": recommended_action, "metadata": episode.metadata,
+                    "s1_state": s1s, "s1_action": s1a, "s2": s2,
+                    "s3_state": s3s, "s3_action": s3a,
+                }
+                for rule in failed: counts[rule] += 1
+                counts["flagged_any"] += int(bool(failed))
+                episode_file.write(json.dumps(report, ensure_ascii=False) + "\n")
+                for rule, signal, result in (
+                    ("S1", "state", s1s), ("S1", "action", s1a),
+                    ("S3", "state", s3s), ("S3", "action", s3a),
+                ):
+                    for hit in result["hits"]:
+                        frame_file.write(json.dumps({
+                            "episode": episode.key, "rule": rule, "signal": signal, **hit,
+                        }) + "\n")
+                if failed and plotted < args.review_plots:
+                    _plot_review(episode, report, review_dir / f"episode_{episode.key}.png")
+                    plotted += 1
+    finally:
+        cache_path.unlink(missing_ok=True)
+
     summary = {
         "dataset_dir": str(args.dataset_dir), "split": args.split,
-        "episodes_scanned": len(episodes), "counts": counts,
-        "state_dimensions": int(episodes[0].state.shape[1]),
-        "action_dimensions": int(episodes[0].action.shape[1]),
+        "episodes_scanned": episodes_scanned, "frames_scanned": total_rows, "counts": counts,
+        "state_dimensions": state_dim, "action_dimensions": action_dim,
         "state_gripper_indices": sorted(state_grippers),
         "action_gripper_indices": sorted(action_grippers),
+        "gripper_resolution": {
+            "state": state_resolution, "action": action_resolution,
+        },
         "config": {"S1": asdict(s1cfg), "S2": asdict(s2cfg), "S3": asdict(s3cfg)},
+        "calibration": {
+            "sampling": "uniform_priority_reservoir",
+            "requested_max_rows": requested_rows,
+            "capacity_rows": capacity_rows,
+            "retained_rows": retained_rows,
+            "memory_budget_mb": args.calibration_memory_mb,
+            "capacity_memory_bytes": capacity_bytes,
+        },
+        "reader": "selected_tfrecord_fields",
         "review_plots": plotted,
         "source_modified": False,
     }
@@ -636,19 +1066,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--max-episodes", type=int)
     parser.add_argument("--state-gripper-indices", default="auto",
-                        help="Comma-separated indices, empty, or 'auto' from state_layout.")
+                        help="Comma-separated indices, empty, or 'auto' from RLDS metadata.")
     parser.add_argument("--action-gripper-indices", default="auto",
-                        help="Comma-separated indices, empty, or 'auto' from action_layout.")
+                        help="Comma-separated indices, empty, or 'auto' from RLDS metadata.")
+    parser.add_argument(
+        "--allow-unresolved-gripper", action="store_true",
+        help="Continue when auto detection has no usable dimension metadata (unsafe).",
+    )
     parser.add_argument("--s1-residual-z", type=float, default=8.0)
     parser.add_argument("--s1-acceleration-z", type=float, default=8.0)
     parser.add_argument("--s1-jerk-z", type=float, default=8.0)
     parser.add_argument("--s1-relative-scale-floor", type=float, default=0.002)
+    parser.add_argument("--s1-max-samples", type=int, default=1_000_000)
     parser.add_argument("--s2-da-threshold", type=float, default=0.6)
     parser.add_argument("--s2-max-lag", type=int, default=10)
     parser.add_argument("--s2-min-active", type=int, default=10)
     parser.add_argument("--s2-allow-negative-lag", action="store_true")
     parser.add_argument("--s3-alpha", type=float, default=1.5)
     parser.add_argument("--s3-max-samples", type=int, default=1_000_000)
+    parser.add_argument("--calibration-memory-mb", type=int, default=2048,
+                        help="Hard cap for retained S1/S3 calibration rows (default: 2048 MiB).")
     parser.add_argument("--review-plots", type=int, default=12)
     return parser
 

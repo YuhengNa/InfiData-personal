@@ -152,9 +152,10 @@ scripts/quality/filter_rlds_state_action.py
 4. 默认异常阈值均为单侧上限 `center + 8 × scale`，只检测异常大的指标，不把
    低于中心的平滑帧视为异常。只有
    `Residual异常 AND (Acceleration异常 OR Jerk异常)` 才命中。
-5. NaN/Inf 直接视为异常。根据 `state_action_schema_json` 自动识别 gripper
-   维度并跳过其突变规则，避免把正常开合误判为突变；gripper 中的 NaN/Inf
-   仍然保留为异常。
+5. NaN/Inf 直接视为异常。根据 RLDS metadata 的逐维 layout、分组维度
+   （`name[N]`/`name:N`）或 feature names 自动识别 gripper；无法解析时默认
+   停止并要求显式索引。gripper 维度跳过突变规则，避免把正常开合误判
+   为突变；gripper 中的 NaN/Inf 仍然保留为异常。
 6. S1 命中默认作为“异常帧/人工复核候选”，不会自动删除整条 episode。
 
 ### S2 当前设计
@@ -190,7 +191,8 @@ scripts/quality/filter_rlds_state_action.py
 3. 任一非 gripper 维度超出范围，或任意维度（包括 gripper）出现
    NaN/Inf，则标记对应帧。
 4. 为控制大型数据集内存，默认每类信号最多采样 1,000,000 行用于拟合阈值。
-   抽样直接在整个 split 的全局行索引上等概率无放回执行，不会偏向后读取的 episode。
+   使用固定容量的 priority reservoir 在整个 split 上等概率无放回抽样，不会偏向
+   后读取的 episode；实际容量同时受 `--calibration-memory-mb`（默认 2048 MiB）限制。
 5. gripper 维度根据 schema 自动识别并跳过数值极值检查，但不忽略非有限值；
    S3 命中默认作为异常帧候选。
 
@@ -206,7 +208,7 @@ source /data/wudi/.venvs/infidata-quality/bin/activate
 先运行算法测试：
 
 ```bash
-python -m unittest -v tests/test_rlds_state_action_filter.py
+python -m unittest -v scripts/quality/test_rlds_state_action_filter.py
 ```
 
 完整筛选一个 RLDS split：
@@ -220,6 +222,10 @@ python scripts/quality/filter_rlds_state_action.py \
 
 快速验证读取流程可增加 `--max-episodes 1`，但小样本拟合的 S1/S3 阈值不能作为
 最终筛选结论。完整结果包含：
+
+脚本只解析 TFRecord 中的 state、action 和 episode metadata，不读取相机张量；校准时
+仅保留有内存上限的均匀样本，其余数值写入输出目录中的临时缓存，随后逐 episode 筛选
+并自动删除缓存，因此内存不会随 episode 数量持续增长。
 
 - `summary.json`：汇总与运行参数；
 - `episodes.jsonl`：每条 episode 的 S1/S2/S3 结论；

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -166,6 +167,89 @@ class StateActionFilterTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(MODULE.resolve_action_is_delta(raw), expected)
 
+    def test_gripper_resolution_expands_grouped_layout(self):
+        metadata = {
+            "state_action_schema_json": {
+                "state_dim": 8,
+                "state_layout": ["franka_joint_position[7]", "gripper_position[1]"],
+            }
+        }
+        indices, resolution = MODULE.resolve_gripper_indices(
+            "auto", metadata, "state", 8,
+        )
+        self.assertEqual(indices, {7})
+        self.assertEqual(resolution["status"], "resolved")
+        self.assertEqual(resolution["source"], "state_action_schema_json.state_layout")
+
+    def test_gripper_resolution_handles_agibot_dimension_blocks(self):
+        metadata = {
+            "state_action_schema_json": json.dumps({
+                "state_dim": 20,
+                "state_dims": [
+                    "state/joint/position:14",
+                    "state/effector/position:2",
+                    "state/head/position:2",
+                    "state/waist/position:2",
+                ],
+            })
+        }
+        indices, resolution = MODULE.resolve_gripper_indices(
+            "auto", metadata, "state", 20,
+        )
+        self.assertEqual(indices, {14, 15})
+        self.assertEqual(resolution["source"], "state_action_schema_json.state_dims")
+
+    def test_gripper_resolution_uses_feature_names(self):
+        metadata = {
+            "state_action_schema_json": {
+                "action_dim": 5,
+                "action_feature": {
+                    "names": ["joint_1", "left_gripper_open", "eef_x", "eef_y", "eef_z"],
+                },
+            }
+        }
+        indices, resolution = MODULE.resolve_gripper_indices(
+            "auto", metadata, "action", 5,
+        )
+        self.assertEqual(indices, {1})
+        self.assertEqual(
+            resolution["source"], "state_action_schema_json.action_feature.names",
+        )
+
+    def test_gripper_resolution_pairs_top_level_fields_and_widths(self):
+        metadata = {
+            "state_fields_json": json.dumps(["joint", "gripper"]),
+            "state_dims_json": json.dumps([7, 1]),
+        }
+        indices, resolution = MODULE.resolve_gripper_indices(
+            "auto", metadata, "state", 8,
+        )
+        self.assertEqual(indices, {7})
+        self.assertEqual(resolution["source"], "state_dims_json")
+
+    def test_gripper_resolution_does_not_treat_eef_or_hand_as_gripper(self):
+        metadata = {
+            "state_action_schema_json": {
+                "state_layout": ["left_hand_joint", "eef_x", "eef_y"],
+            }
+        }
+        indices, resolution = MODULE.resolve_gripper_indices(
+            "auto", metadata, "state", 3,
+        )
+        self.assertEqual(indices, set())
+        self.assertEqual(resolution["status"], "resolved")
+
+    def test_gripper_resolution_reports_unresolved_metadata(self):
+        indices, resolution = MODULE.resolve_gripper_indices(
+            "auto", {}, "state", 7,
+        )
+        self.assertEqual(indices, set())
+        self.assertEqual(resolution["status"], "unresolved")
+
+    def test_explicit_gripper_indices_are_range_checked(self):
+        with self.assertRaisesRegex(ValueError, "outside dimension 2"):
+            MODULE.resolve_gripper_indices("2", {}, "action", 2)
+
     def test_s3_detects_extreme_and_ignores_gripper(self):
         rng = np.random.default_rng(3)
         normal = rng.normal(0, 1, size=(500, 2))
@@ -221,6 +305,19 @@ class StateActionFilterTests(unittest.TestCase):
         )
         self.assertEqual(total_rows, 30)
         np.testing.assert_array_equal(sampled[:, 0], expected_indices)
+
+    def test_streaming_reservoir_keeps_exact_global_priority_sample(self):
+        values = np.arange(100, dtype=np.float32)[:, None]
+        expected = np.argpartition(np.random.default_rng(7).random(100), 9)[:10]
+        reservoir = MODULE._PriorityReservoir(capacity=10, columns=1, seed=7)
+        reservoir.update(values[:7])
+        reservoir.update(values[7:20])
+        reservoir.update(values[20:])
+
+        self.assertEqual(reservoir.sample.shape, (10, 1))
+        np.testing.assert_array_equal(
+            np.sort(reservoir.sample[:, 0].astype(int)), np.sort(expected),
+        )
 
 
 if __name__ == "__main__":

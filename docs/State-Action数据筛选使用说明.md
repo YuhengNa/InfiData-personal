@@ -10,7 +10,7 @@
 
 工具只生成筛选清单和人工复核材料，不修改源 RLDS。
 `quality_runs/` 已加入 `.gitignore`，运行结果保存在仓库目录中但不会提交到 Git。
-运行时会显示 RLDS 读取、S1 State/Action 阈值拟合和逐 episode 筛选的进度、速度与 ETA。
+运行时会显示阈值校准和逐 episode 筛选两阶段的进度、速度与 ETA。
 
 ## 实现约定
 
@@ -18,10 +18,13 @@
 2. S1 使用 MAD 鲁棒尺度，并以每维 q01-q99 范围的 0.2% 作为最小尺度，按
    `center + z_threshold × scale` 进行单侧上限检测。Acceleration 的首尾帧和
    Jerk 的前后两帧没有完整中心差分邻域，不参与阈值拟合和检测。
-3. 从 `state_action_schema_json` 的 layout 自动识别 gripper。gripper 的正常开合是离散/双峰信号，
+3. 从 RLDS metadata 自动识别 gripper：支持逐维 layout、`name[N]`/`name:N`
+   分组维度和 feature names，并校验展开后的维度。无法解析时正式运行默认停止，
+   需要显式指定夹爪索引或空索引。gripper 的正常开合是离散/双峰信号，
    S1/S3 不对其执行突变或极值规则，但其中的 NaN/Inf 仍直接视为异常。
 4. S3 拟合前将所有 NaN/Inf 排除出分位数计算，记录每维有限样本数和无效阈值
-   维度。超过一百万行时，从整个 split 的全局行索引中等概率无放回抽样。
+   维度。超过一百万行时，以固定容量的 priority reservoir 从整个 split 中等概率
+   无放回抽样；样本容量还受 `--calibration-memory-mb` 限制。
 5. S2 默认 DA 阈值为 0.6，搜索 ±10 帧延迟。计算方向时把绝对值不超过
    `motion_epsilon=1e-5` 的差分视为静止；负延迟表示 state 领先 action，按反因果风险标记。
    S2 默认跳过 state/action 任一侧标记为 gripper 的维度。
@@ -30,6 +33,9 @@
    的原生 RLDS 均为 absolute source target 的约定，`"unknown"`、缺失或非法值
    默认按 absolute 处理，并在输出中记录 `action_semantics_source=default_absolute`。
 7. S2 命中建议 episode 级排除；S1/S3 命中只建议复核或过滤相应帧。
+8. 读取器直接从 TFRecord 中选择性解析 state、action 和 episode metadata，不生成相机
+   图像张量。校准阶段只保留定长样本，并把逐 episode 数值写入输出目录下的临时缓存；
+   筛选阶段逐条读取并释放，成功或失败后自动删除缓存，不再把整个数据集留在内存中。
 
 ## 环境
 
@@ -74,6 +80,17 @@ python scripts/quality/filter_rlds_state_action.py \
 小规模 smoke test 可以增加 `--max-episodes 1`，但小样本拟合的 S1/S3
 阈值不适合用作最终筛选结论。
 
+校准样本默认最多占用 2048 MiB，且 S1/S3 各自最多使用 1,000,000 帧。内存配额
+较小时可显式降低，例如：
+
+```bash
+python scripts/quality/filter_rlds_state_action.py ... \
+  --calibration-memory-mb 512
+```
+
+这个参数只影响用于拟合数据集级阈值的均匀样本量，不减少实际扫描的 episode 数；
+最终采用的样本行数会记录在 `summary.json` 的 `calibration` 中。
+
 ## 筛选全部 RLDS 仓库
 
 `scripts/quality/run_all_rlds_state_action.sh` 不包含变量、循环、条件判断或自动发现逻辑。
@@ -106,9 +123,9 @@ nohup bash scripts/quality/run_all_rlds_state_action.sh \
 `unseen_test`，复制对应命令后将 `--split train` 和输出目录末尾的 `train` 改为
 `unseen_test`。
 
-全量 RLDS 声明规模约 46 TB，运行会产生大量 BOS 读取并持续较长时间。当前单数据集
-筛选器会在内存中保留该 dataset version 的数值 State/Action；每条命令结束后内存会被
-释放，但超大单库仍需监控内存。不要并发启动多个全量筛选任务。
+全量 RLDS 声明规模约 46 TB，运行会产生大量 BOS 读取并持续较长时间。筛选器的内存
+不再随 episode 数量增长，但校准过程中会在输出目录生成临时 state/action 缓存，因此需
+保证磁盘空间充足。不要并发启动多个全量筛选任务。
 
 ## 输出
 
