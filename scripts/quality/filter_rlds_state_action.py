@@ -17,6 +17,7 @@ from typing import Any, Iterable
 import numpy as np
 from scipy.ndimage import median_filter
 from scipy.signal import savgol_filter
+from tqdm import tqdm
 
 
 @dataclass
@@ -122,7 +123,7 @@ def _s1_metrics(values: np.ndarray, cfg: S1Config) -> tuple[np.ndarray, dict[str
 
 def fit_s1(episodes: Iterable[Episode], cfg: S1Config, signal: str) -> dict[str, Any]:
     values_chunks, metric_chunks = [], {"residual": [], "acceleration": [], "jerk": []}
-    for episode in episodes:
+    for episode in tqdm(episodes, desc=f"Fitting S1 {signal}", unit="episode"):
         values = episode.state if signal == "state" else episode.action
         _, metrics = _s1_metrics(values, cfg)
         values_chunks.append(_fill_nonfinite(values))
@@ -455,10 +456,13 @@ def load_rlds(dataset_dir: Path, split: str, max_episodes: int | None) -> list[E
         camera: tfds.decode.SkipDecoding() for camera in cameras
     }}}}
     dataset = builder.as_dataset(split=split, decoders=decoders)
+    total = builder.info.splits[split].num_examples
     if max_episodes is not None:
         dataset = dataset.take(max_episodes)
+        total = min(total, max_episodes)
     episodes = []
-    for ordinal, raw in enumerate(dataset):
+    progress = tqdm(dataset, total=total, desc=f"Loading {split}", unit="episode")
+    for ordinal, raw in enumerate(progress):
         metadata = _decode(raw["episode_metadata"])
         states, actions = [], []
         for step in raw["steps"].as_numpy_iterator():
@@ -466,8 +470,6 @@ def load_rlds(dataset_dir: Path, split: str, max_episodes: int | None) -> list[E
             actions.append(step["action"])
         key = str(metadata.get("source_episode_index", metadata.get("episode_index", ordinal)))
         episodes.append(Episode(key, np.asarray(states), np.asarray(actions), metadata))
-        print(f"\rLoaded {len(episodes)} episode(s)", end="", flush=True)
-    print()
     return episodes
 
 
@@ -538,7 +540,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     frames_path = output / "flagged_frames.jsonl"
     with (output / "episodes.jsonl").open("w", encoding="utf-8") as episode_file, \
             frames_path.open("w", encoding="utf-8") as frame_file:
-        for episode in episodes:
+        for episode in tqdm(episodes, desc="Screening episodes", unit="episode"):
             raw_action_is_delta = episode.metadata.get("action_is_delta")
             action_is_delta, action_semantics_source = resolve_action_is_delta(
                 raw_action_is_delta,

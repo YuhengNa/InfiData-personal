@@ -10,6 +10,7 @@
 
 工具只生成筛选清单和人工复核材料，不修改源 RLDS。
 `quality_runs/` 已加入 `.gitignore`，运行结果保存在仓库目录中但不会提交到 Git。
+运行时会显示 RLDS 读取、S1 State/Action 阈值拟合和逐 episode 筛选的进度、速度与 ETA。
 
 ## 实现约定
 
