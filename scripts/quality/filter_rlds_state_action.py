@@ -551,6 +551,14 @@ def _decode(value: Any) -> Any:
     return value
 
 
+def _episode_key(metadata: dict[str, Any], ordinal: int) -> str:
+    global_key = metadata.get("global_episode_key")
+    if global_key is not None and str(global_key):
+        return str(global_key)
+    episode_index = metadata.get("episode_index")
+    return str(ordinal if episode_index is None else episode_index)
+
+
 def iter_rlds(dataset_dir: Path, split: str, max_episodes: int | None,
               desc: str = "Reading RLDS") -> Iterator[Episode]:
     """Read only state/action/metadata fields from TFRecords, never camera tensors."""
@@ -586,7 +594,7 @@ def iter_rlds(dataset_dir: Path, split: str, max_episodes: int | None,
         metadata = _decode(raw["episode_metadata"])
         state = raw["steps"]["observation"]["state"].numpy()
         action = raw["steps"]["action"].numpy()
-        key = str(metadata.get("source_episode_index", metadata.get("episode_index", ordinal)))
+        key = _episode_key(metadata, ordinal)
         yield Episode(key, state, action, metadata)
 
 
@@ -860,6 +868,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     action_resolution: dict[str, Any] | None = None
     state_grippers: set[int] = set()
     action_grippers: set[int] = set()
+    episode_keys: set[str] = set()
     state_dim = action_dim = total_rows = episodes_scanned = 0
     requested_rows = max(s1cfg.max_samples, s3cfg.max_samples)
     capacity_rows = capacity_bytes = 0
@@ -868,6 +877,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             for episode in iter_rlds(
                 args.dataset_dir, args.split, args.max_episodes, desc=f"Calibrating {args.split}",
             ):
+                if episode.key in episode_keys:
+                    raise ValueError(f"Duplicate episode key {episode.key!r} in split {args.split!r}")
+                episode_keys.add(episode.key)
                 if episode.state.ndim != 2 or episode.action.ndim != 2:
                     raise ValueError(
                         f"episode {episode.key}: state/action must be rank 2, got "

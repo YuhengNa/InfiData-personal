@@ -18,6 +18,21 @@ SPEC.loader.exec_module(MODULE)
 
 
 class StateActionFilterTests(unittest.TestCase):
+    def test_episode_key_prefers_explicit_global_key(self):
+        metadata = {
+            "global_episode_key": "RoboMIND_shard_1:4164",
+            "episode_index": 4164,
+            "source_episode_index": 98,
+        }
+        self.assertEqual(MODULE._episode_key(metadata, 7), "RoboMIND_shard_1:4164")
+
+    def test_episode_key_uses_episode_index_without_global_key(self):
+        metadata = {"episode_index": 4164, "source_episode_index": 98}
+        self.assertEqual(MODULE._episode_key(metadata, 7), "4164")
+
+    def test_episode_key_falls_back_to_ordinal(self):
+        self.assertEqual(MODULE._episode_key({"source_episode_index": 98}, 7), "7")
+
     def test_s1_detects_injected_spike(self):
         x = np.sin(np.linspace(0, 4 * np.pi, 160))[:, None]
         x[80, 0] += 20
