@@ -1,161 +1,162 @@
-# RLDS State-Action 数据筛选（S1/S2/S3）
+# RLDS State-Action 质量筛选与数据落盘对接文档
 
-实现脚本：`scripts/quality/filter_rlds_state_action.py`
+本文档是两个正式功能的交接入口：
 
-本工具对应 `docs/Qwen数据筛选方案.txt` 的第一部分，只执行：
+1. 对原始 RLDS 的 `train` split 执行 State-Action S1/S2/S3 质量筛选，生成可审计记录；
+2. 按已确认的 P0–P5 策略将筛选记录转为最终决策，生成一份独立、可训练的 RLDS 副本。
 
-- S1：Median Filter + Savitzky–Golay 平滑，并联合判断 residual 与 acceleration/jerk；
-- S2：在物理语义和 layout 可比时，以 cross-correlation 寻找延迟并计算 Directional Agreement；
-- S3：按维度拟合 q01/q99，并使用可配置的 alpha 扩展范围寻找极端值。
+整个流程不会删除或改写原始 `/data/wudi/RLDS` 数据。
 
-工具只生成筛选清单和人工复核材料，不修改源 RLDS。
-`quality_runs/` 已加入 `.gitignore`，运行结果保存在仓库目录中但不会提交到 Git。
-运行时会显示阈值校准和逐 episode 筛选两阶段的进度、速度与 ETA。
+## 1. 代码与数据位置
 
-## 实现约定
+两个功能所需的正式代码和入口脚本均在本仓库内：
 
-1. S1 和 S3 先基于本次扫描的数据拟合数据集级阈值，再逐 episode 判断。
-2. S1 使用 MAD 鲁棒尺度，并以每维 q01-q99 范围的 0.2% 作为最小尺度，按
-   `center + z_threshold × scale` 进行单侧上限检测。Acceleration 的首尾帧和
-   Jerk 的前后两帧没有完整中心差分邻域，不参与阈值拟合和检测。
-3. 从 RLDS metadata 自动识别 gripper：支持逐维 layout、`name[N]`/`name:N`
-   分组维度和 feature names，并校验展开后的维度。无法解析时正式运行默认停止，
-   需要显式指定夹爪索引或空索引。gripper 的正常开合是离散/双峰信号，
-   S1/S3 不对其执行突变或极值规则，但其中的 NaN/Inf 仍直接视为异常。
-4. S3 拟合前将所有 NaN/Inf 排除出分位数计算，记录每维有限样本数和无效阈值
-   维度。超过一百万行时，以固定容量的 priority reservoir 从整个 split 中等概率
-   无放回抽样；样本容量还受 `--calibration-memory-mb` 限制。
-5. S2 默认 DA 阈值为 0.6，搜索 ±10 帧延迟。计算方向时把绝对值不超过
-   `motion_epsilon=1e-5` 的差分视为静止；负延迟表示 state 领先 action，按反因果风险标记。
-   S2 默认跳过 state/action 任一侧标记为 gripper 的维度。
-6. action 为 delta 时先积分。state/action layout 不同或物理语义不明确时，S2 会标为 skipped，不进行错误比较。
-   `action_is_delta` 仅接受布尔值或字符串 `"true"`/`"false"`。根据当前项目
-   的原生 RLDS 均为 absolute source target 的约定，`"unknown"`、缺失或非法值
-   默认按 absolute 处理，并在输出中记录 `action_semantics_source=default_absolute`。
-7. S2 命中建议 episode 级排除；S1/S3 命中只建议复核或过滤相应帧。
-8. 读取器直接从 TFRecord 中选择性解析 state、action 和 episode metadata，不生成相机
-   图像张量。校准阶段只保留定长样本，并把逐 episode 数值写入输出目录下的临时缓存；
-   筛选阶段逐条读取并释放，成功或失败后自动删除缓存，不再把整个数据集留在内存中。
+| 文件 | 用途 |
+|---|---|
+| `scripts/quality/filter_rlds_state_action.py` | 单个 RLDS split 的 S1/S2/S3 筛选 |
+| `scripts/quality/run_all_rlds_state_action.sh` | 顺序执行当前 44 个 RLDS 配置的正式筛选 |
+| `scripts/quality/select_robomind_quality_candidates.py` | 应用 RoboMIND P3–P5 特殊策略 |
+| `scripts/quality/build_final_rlds_decisions.py` | 生成并强校验 44 个配置的最终 episode 决策 |
+| `scripts/quality/materialize_filtered_rlds.py` | 按决策重写 train TFRecord，复制其他 split 和 metadata |
+| `scripts/quality/run_final_rlds_materialization.sh` | 重建最终决策并创建/续传筛选后 RLDS 的总入口 |
 
-## 环境
+数据与运行产物不纳入 Git：
 
-本次使用的独立环境：
+- 原始 RLDS：`/data/wudi/RLDS`
+- S1/S2/S3 记录：`/data/wudi/InfiData-personal/quality_runs/all_rlds`
+- 最终决策：`/data/wudi/InfiData-personal/quality_runs/final_selection`
+- 筛选后 RLDS：`/data/wudi/RLDS_State_Action_Filtered_20260807`
+
+`quality_runs/` 已在 `.gitignore` 中。新 clone 的仓库不包含筛选记录，需先执行第 3 节生成。
+
+## 2. 环境
+
+当前可用环境：
 
 ```bash
 source /data/wudi/.venvs/infidata-quality/bin/activate
 ```
 
-若需重新创建：
+重建环境时需安装：
 
 ```bash
 uv venv /data/wudi/.venvs/infidata-quality --python 3.12
 uv pip install --python /data/wudi/.venvs/infidata-quality/bin/python \
-  'numpy<2.3' scipy matplotlib tensorflow-cpu tensorflow-datasets
+  'numpy<2.3' scipy matplotlib tensorflow-cpu tensorflow-datasets tqdm
 ```
 
-## 算法测试是什么
+## 3. 功能一：State-Action 筛选
 
-`scripts/quality/test_rlds_state_action_filter.py` 是不读取真实 RLDS 的快速回归测试。它构造结果
-已知的合成信号，检查：
+### 3.1 检查内容
 
-- S1 能命中人为注入的尖峰，只检测异常大的指标，排除有限差分边界，并在跳过
-  gripper 正常开合的同时保留 NaN/Inf；
-- S2 能恢复已知的 3 帧 Action→State 延迟、识别反向趋势，并拒绝不兼容 layout；
-- S3 能命中极端值，同时不误筛 gripper。
+- **S1 Sudden Change**：使用 Median Filter、Savitzky–Golay 和中心差分计算 residual/acceleration/jerk，以数据集级单侧鲁棒上限检测突变。
+- **S2 State-Action Alignment**：只在物理语义和 layout 可比时计算方向一致性与时延；未明确标记 delta 的原生 action 默认按 absolute 处理。
+- **S3 Extreme Value**：按维度估计 q01/q99，用 `alpha=1.5` 扩展范围检测极端值。
 
-保留该文件是为了防止以后修改阈值、平滑方法或重构代码时破坏核心逻辑。它只验证算法
-行为，不代表真实数据质量，也不会产生或提交 `quality_runs`。
+Gripper 的正常离散开合不参与 S1/S3 幅值检查，也不参与 S2；但任意维度中的 NaN/Inf 仍然标记为异常。详细定义见 `docs/Qwen数据筛选方案.txt`。
 
-## 运行
-
-完整扫描 realworld_piper_2 train：
+### 3.2 运行单个数据集
 
 ```bash
-python scripts/quality/filter_rlds_state_action.py \
+/data/wudi/.venvs/infidata-quality/bin/python \
+  /data/wudi/InfiData-personal/scripts/quality/filter_rlds_state_action.py \
   --dataset-dir /data/wudi/RLDS/realworld_piper_2/realworld_piper_infidata/1.0.0 \
   --split train \
-  --output-dir /data/wudi/InfiData-personal/quality_runs/realworld_piper_2_train
+  --output-dir /data/wudi/InfiData-personal/quality_runs/all_rlds/realworld_piper_2/realworld_piper_infidata/1.0.0/train
 ```
 
-小规模 smoke test 可以增加 `--max-episodes 1`，但小样本拟合的 S1/S3
-阈值不适合用作最终筛选结论。
+正式运行时会显示校准和逐 episode 筛选的进度、速度与 ETA。
 
-校准样本默认最多占用 2048 MiB，且 S1/S3 各自最多使用 1,000,000 帧。内存配额
-较小时可显式降低，例如：
-
-```bash
-python scripts/quality/filter_rlds_state_action.py ... \
-  --calibration-memory-mb 512
-```
-
-这个参数只影响用于拟合数据集级阈值的均匀样本量，不减少实际扫描的 episode 数；
-最终采用的样本行数会记录在 `summary.json` 的 `calibration` 中。
-
-## 筛选全部 RLDS 仓库
-
-`scripts/quality/run_all_rlds_state_action.sh` 不包含变量、循环、条件判断或自动发现逻辑。
-其中按数据集分组，明确列出了当前 49 个 RLDS version 的 49 条完整 Python 命令。
-每条命令都写明输入目录、`train` split 和独立输出目录。
-
-先查看命令清单：
-
-```bash
-less /data/wudi/InfiData-personal/scripts/quality/run_all_rlds_state_action.sh
-```
-
-可以从文件中复制任意一条 Python 命令，单独筛选对应的 RLDS version。需要顺序执行
-全部 49 条命令时：
+### 3.3 运行全部 44 个配置
 
 ```bash
 cd /data/wudi/InfiData-personal
 bash scripts/quality/run_all_rlds_state_action.sh
 ```
 
-如需后台执行：
+该脚本不使用自动发现、循环或条件分支，而是显式列出 44 条已验收命令和对应 gripper 参数。运行时不要并发启动多个全量筛选任务。
+
+每个配置的主要产物：
+
+- `summary.json`：扫描总数、命中数和运行配置；
+- `episodes.jsonl`：逐 episode 的 S1/S2/S3 结论与证据；
+- `flagged_frames.jsonl`：异常帧、维度、数值和阈值；
+- `s1_thresholds.json` / `s3_thresholds.json`：数据集级阈值；
+- `review/*.png`：人工复核曲线。
+
+## 4. 最终删除策略
+
+不得直接用原始 `flagged_any` 删除数据。最终决策使用已确认的 P0–P5：
+
+| 策略 | 数据集 | 最终判定 |
+|---|---|---|
+| P0 | AgiBot、realworld_piper_2、realworld_piper_task_split | 使用 S1、S2、S3 去重并集 |
+| P1 | DROID | S1 只看 state；保留 S2、S3 |
+| P2 | EgoVerse_full、RoboCOIN | 不使用 S1；只使用 S2、S3 |
+| P3 | RoboMIND master–puppet | S1 只看 state；不使用 S2；保留 S3 |
+| P4 | RoboMIND Franka 仿真 | S1 至少命中 3 帧且占比至少 1%；保留 S2、S3 |
+| P5 | RoboMIND Tiankung s38 | S1/S2 只看双臂 `0-6,19-25`；S2 要求 `active_samples>=20`；保留 S3 |
+
+当前固定验收口径是 44 个配置、355,654 条 episode，删除 31,585（8.88%），保留 324,069（91.12%）。当数据集版本或策略变化时，应同步评审并更新 `build_final_rlds_decisions.py` 中的期望数量，不应绕过强校验。
+
+## 5. 功能二：按筛选记录落盘
+
+### 5.1 正式运行
+
+确认第 3 节的 44 个正式记录已完成后，直接运行：
 
 ```bash
-nohup bash scripts/quality/run_all_rlds_state_action.sh \
-  > quality_runs/all_rlds.log 2>&1 &
+/data/wudi/InfiData-personal/scripts/quality/run_final_rlds_materialization.sh
 ```
 
-随后用 `tail -f quality_runs/all_rlds.log` 查看进度。当前命令清单刻意不实现断点跳过：
-如任务中断，直接从文件中找到尚未完成的数据集命令，并单独执行即可。若要筛选
-`unseen_test`，复制对应命令后将 `--split train` 和输出目录末尾的 `train` 改为
-`unseen_test`。
+该入口会顺序执行：
 
-全量 RLDS 声明规模约 46 TB，运行会产生大量 BOS 读取并持续较长时间。筛选器的内存
-不再随 episode 数量增长，但校准过程中会在输出目录生成临时 state/action 缓存，因此需
-保证磁盘空间充足。不要并发启动多个全量筛选任务。
+1. 重建 RoboMIND P3–P5 决策；
+2. 重建全部 P0–P5 决策并强校验数量；
+3. 将筛选后的独立 RLDS 写入 `/data/wudi/RLDS_State_Action_Filtered_20260807`。
 
-## 输出
+这是长时间任务，建议在 `tmux` 内运行。同一条命令可以安全重跑：已完成的 train shard 会根据 checkpoint 校验后跳过，未完成文件通过 `.incomplete` 临时文件重写，不会当作成功产物。
 
-- `summary.json`：运行配置和规则命中数量；
-- `episodes.jsonl`：每个 episode 的结论、S1/S2/S3 详情和建议动作；
-- `flagged_frames.jsonl`：S1/S3 命中的帧、维度、数值和阈值证据；
-- `s1_thresholds.json`、`s3_thresholds.json`：可复现的数据集级阈值；
-- `review/*.png`：命中 episode 的 state/action 曲线和异常帧标线。
+### 5.2 只做落盘预检
 
-## 首次测试结果
+不带 `--execute` 时只校验 manifest、源数据和空间，不写数据：
 
-数据集：
-`/data/wudi/RLDS/realworld_piper_2/realworld_piper_infidata/1.0.0`
+```bash
+/data/wudi/.venvs/infidata-quality/bin/python \
+  /data/wudi/InfiData-personal/scripts/quality/materialize_filtered_rlds.py \
+  --source-root /data/wudi/RLDS \
+  --output-root /data/wudi/RLDS_State_Action_Filtered_20260807
+```
 
-| 测试 | Episodes | S1 | S2 | S3 |
-|---|---:|---:|---:|---:|
-| seen_test（校准后） | 45 | 0 | 0 | 0 |
-| train 全量 | 902 | 3 | 0 | 0 |
+### 5.3 落盘行为
 
-全量 train 无 TFRecord 解码失败或 state/action shape 异常。
+- 原始 RLDS 始终只读；
+- 只对 `train` TFRecord 进行 episode 级过滤，保留的 serialized Example 原样复制，不解码/重编码图像；
+- 其他 split 和 metadata 逐字节复制；
+- 更新 `dataset_info.json` 中 train 的 shard length 和字节数；
+- train 被全部删除的配置不进入训练清单。
 
-人工复核：
+运行中会显示全局字节进度、速度和 ETA。完成后根目录应包含：
 
-- Episode 123，frame 271，joint dim 5：短时反向运动，连续且幅度不大，更像正常快速动作，倾向假阳性；
-- Episode 18，frames 1035–1036，joint dim 7：约两帧的明显速度突增，建议结合视频复核；
-- Episode 205，frame 454，joint dim 11：单帧步长显著高于邻帧，建议结合视频复核。
+- `_QUALITY_FILTER_BATCH_SUMMARY.json`：全局落盘汇总；
+- `_TRAIN_DATASETS.json`：最终可训练配置清单；
+- 每个配置的 `_QUALITY_FILTER_SUCCESS.json`、`dataset_info.json` 和 `_SUCCESS`。
 
-三条候选的 action 均与 state 保持严格的 1 帧领先关系，S2 DA 接近 1。
-因此目前没有证据将它们直接认定为 packet loss 或错配数据，工具将其保留为人工复核候选。
+## 6. 下游使用
 
-注意：该数据集的 action 表示为
-`next_step_absolute_joint_position_with_gripper`，S2 的严格一致也可能部分来自
-action 的构造方式。S2 在此数据集上能验证转换后的时序关系，但不是完全独立的传感器交叉验证。
+训练代码应显式指向新副本：
+
+```bash
+export RLDS_DATA_DIR=/data/wudi/RLDS_State_Action_Filtered_20260807
+```
+
+可训练数据集应以 `${RLDS_DATA_DIR}/_TRAIN_DATASETS.json` 为准，不要再从目录名自动推断。
+
+## 7. 对接验收清单
+
+1. `run_all_rlds_state_action.sh` 的 44 条命令全部成功；
+2. `quality_runs/all_rlds` 下每个配置都有 `summary.json` 和 `episodes.jsonl`；
+3. 最终决策校验为 44 / 355,654 / 31,585 / 324,069；
+4. 落盘根目录存在 `_QUALITY_FILTER_BATCH_SUMMARY.json` 和 `_TRAIN_DATASETS.json`；
+5. 每个需要训练的配置均有 `_QUALITY_FILTER_SUCCESS.json` 和 `_SUCCESS`；
+6. 原始 `/data/wudi/RLDS` 的目录和文件未被改写。

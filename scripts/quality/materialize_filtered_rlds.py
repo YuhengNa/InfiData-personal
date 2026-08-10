@@ -534,7 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("/mnt/bos/bo23lu/RLDS_State_Action_Filtered_20260807"),
+        default=Path("/data/wudi/RLDS_State_Action_Filtered_20260807"),
     )
     parser.add_argument(
         "--dataset",

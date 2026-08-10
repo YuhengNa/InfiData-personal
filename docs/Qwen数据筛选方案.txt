@@ -205,12 +205,6 @@ cd /data/wudi/InfiData-personal
 source /data/wudi/.venvs/infidata-quality/bin/activate
 ```
 
-先运行算法测试：
-
-```bash
-python -m unittest -v scripts/quality/test_rlds_state_action_filter.py
-```
-
 完整筛选一个 RLDS split：
 
 ```bash
